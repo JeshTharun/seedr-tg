@@ -145,6 +145,7 @@ class QueueRunner:
         file_paths = await self._downloader.download_files(
             remote_files,
             local_root,
+            concurrency=self._settings.download_concurrency,
             progress_hook=lambda current, total, name: self._update_progress(
                 job_id,
                 JobPhase.DOWNLOADING_LOCAL,
@@ -175,6 +176,8 @@ class QueueRunner:
             caption_prefix=snapshot.title or f"Job {job.id}",
             job_id=job.id,
             upload_settings=await self._repository.get_upload_settings(),
+            max_concurrent_uploads=self._settings.upload_concurrency,
+            upload_part_size_kb=self._settings.upload_part_size_kb,
             progress_hook=lambda index, total_files, detail, current_bytes, total_bytes: self._track_upload_progress(
                 job_id,
                 index,
@@ -255,24 +258,27 @@ class QueueRunner:
     async def _track_upload_progress(
         self,
         job_id: int,
-        current_file_index: int,
+        completed_files: int,
         total_files: int,
         detail: str,
         current_bytes: int,
         total_bytes: int,
     ) -> None:
-        percent = (current_file_index / total_files) * 100 if total_files else 100.0
-        del total_bytes
+        file_fraction = 0.0
+        if total_bytes > 0:
+            file_fraction = min(1.0, max(0.0, current_bytes / total_bytes))
+        overall_units = completed_files + file_fraction
+        percent = (overall_units / total_files) * 100 if total_files else 100.0
         upload_speed_bps = self._compute_speed(
             job_id,
-            f"upload:{current_file_index}",
+            "upload",
             current_bytes,
         )
         job = await self._transition(
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
-            progress_percent=percent,
-            uploaded_file_count=current_file_index - 1,
+            progress_percent=min(percent, 100.0),
+            uploaded_file_count=min(completed_files, total_files),
             upload_file_count=total_files,
             upload_speed_bps=upload_speed_bps,
             current_step=detail,

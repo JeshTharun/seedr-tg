@@ -147,34 +147,45 @@ class TelegramUploader:
         job_id: int | None = None,
         upload_settings: UploadSettings | None = None,
         progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None = None,
+        max_concurrent_uploads: int = 1,
+        upload_part_size_kb: int = 512,
     ) -> None:
         client = await self._get_client()
         total_files = len(file_paths)
-        for index, file_path in enumerate(file_paths, start=1):
+        semaphore = asyncio.Semaphore(max(1, int(max_concurrent_uploads)))
+        progress_lock = asyncio.Lock()
+        completed_files = 0
+
+        async def upload_one(file_path: Path) -> None:
+            nonlocal completed_files
             last_emit = 0.0
 
             def on_progress(
                 current: int,
                 total: int,
                 *,
-                current_index: int = index,
                 current_name: str = file_path.name,
             ) -> None:
                 nonlocal last_emit
-                if progress_hook is not None:
-                    now = time.monotonic()
-                    if current < total and (now - last_emit) < 1.0:
-                        return
-                    last_emit = now
-                    asyncio.create_task(
-                        progress_hook(
-                            current_index,
-                            total_files,
-                            f"{current_name} {current}/{total}",
-                            int(current),
-                            int(total),
-                        )
+                if progress_hook is None:
+                    return
+                now = time.monotonic()
+                if current < total and (now - last_emit) < 1.0:
+                    return
+                last_emit = now
+
+                async def emit() -> None:
+                    async with progress_lock:
+                        done = completed_files
+                    await progress_hook(
+                        done,
+                        total_files,
+                        f"{current_name} {current}/{total}",
+                        int(current),
+                        int(total),
                     )
+
+                asyncio.create_task(emit())
 
             caption, parse_mode = self._render_caption(
                 file_path=file_path,
@@ -189,6 +200,7 @@ class TelegramUploader:
                 "caption": caption,
                 "supports_streaming": True,
                 "progress_callback": on_progress,
+                "part_size_kb": int(upload_part_size_kb),
             }
             if parse_mode is not None:
                 kwargs["parse_mode"] = parse_mode
@@ -196,9 +208,25 @@ class TelegramUploader:
                 kwargs["force_document"] = True
             if thumb_path is not None:
                 kwargs["thumb"] = str(thumb_path)
-            kwargs["part_size_kb"] = 512
-            await client.send_file(**kwargs)
+
+            async with semaphore:
+                await client.send_file(**kwargs)
+
+            async with progress_lock:
+                completed_files += 1
+                done = completed_files
+            if progress_hook is not None:
+                await progress_hook(
+                    done,
+                    total_files,
+                    f"Uploaded {file_path.name}",
+                    1,
+                    1,
+                )
             LOGGER.info("Uploaded %s to Telegram", file_path)
+
+        tasks = [asyncio.create_task(upload_one(file_path)) for file_path in file_paths]
+        await asyncio.gather(*tasks)
 
     @staticmethod
     def _resolve_thumbnail_path(upload_settings: UploadSettings | None) -> Path | None:

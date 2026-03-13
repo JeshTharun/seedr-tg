@@ -33,6 +33,9 @@ class Settings(BaseSettings):
         default=5.0,
         alias="PROGRESS_UPDATE_INTERVAL_SECONDS",
     )
+    download_concurrency: int = Field(default=4, alias="DOWNLOAD_CONCURRENCY")
+    upload_concurrency: int = Field(default=2, alias="UPLOAD_CONCURRENCY")
+    upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         alias="LOG_LEVEL",
