@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
 from pathlib import Path
+from typing import Any
 
 from telethon import TelegramClient
-from telethon.errors import PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
+from telethon.errors import (
+    FloodWaitError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    RPCError,
+    SessionPasswordNeededError,
+)
 from telethon.sessions import StringSession
 
 from seedr_tg.db.models import (
@@ -149,6 +158,9 @@ class TelegramUploader:
         progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None = None,
         max_concurrent_uploads: int = 1,
         upload_part_size_kb: int = 512,
+        upload_max_retries: int = 4,
+        upload_retry_base_delay_seconds: float = 1.0,
+        upload_retry_max_delay_seconds: float = 30.0,
     ) -> None:
         client = await self._get_client()
         total_files = len(file_paths)
@@ -159,6 +171,7 @@ class TelegramUploader:
         async def upload_one(file_path: Path) -> None:
             nonlocal completed_files
             last_emit = 0.0
+            progress_emit_task: asyncio.Task[None] | None = None
 
             def on_progress(
                 current: int,
@@ -166,13 +179,19 @@ class TelegramUploader:
                 *,
                 current_name: str = file_path.name,
             ) -> None:
-                nonlocal last_emit
+                nonlocal last_emit, progress_emit_task
                 if progress_hook is None:
                     return
                 now = time.monotonic()
                 if current < total and (now - last_emit) < 1.0:
                     return
                 last_emit = now
+                if (
+                    progress_emit_task is not None
+                    and not progress_emit_task.done()
+                    and current < total
+                ):
+                    return
 
                 async def emit() -> None:
                     async with progress_lock:
@@ -185,7 +204,8 @@ class TelegramUploader:
                         int(total),
                     )
 
-                asyncio.create_task(emit())
+                progress_emit_task = asyncio.create_task(emit())
+                progress_emit_task.add_done_callback(self._handle_progress_emit_done)
 
             caption, parse_mode = self._render_caption(
                 file_path=file_path,
@@ -210,7 +230,13 @@ class TelegramUploader:
                 kwargs["thumb"] = str(thumb_path)
 
             async with semaphore:
-                await client.send_file(**kwargs)
+                await self._send_file_with_retry(
+                    client,
+                    kwargs,
+                    upload_max_retries=upload_max_retries,
+                    upload_retry_base_delay_seconds=upload_retry_base_delay_seconds,
+                    upload_retry_max_delay_seconds=upload_retry_max_delay_seconds,
+                )
 
             async with progress_lock:
                 completed_files += 1
@@ -227,6 +253,58 @@ class TelegramUploader:
 
         tasks = [asyncio.create_task(upload_one(file_path)) for file_path in file_paths]
         await asyncio.gather(*tasks)
+
+    async def _send_file_with_retry(
+        self,
+        client: TelegramClient,
+        kwargs: dict[str, Any],
+        *,
+        upload_max_retries: int,
+        upload_retry_base_delay_seconds: float,
+        upload_retry_max_delay_seconds: float,
+    ) -> None:
+        max_attempts = max(1, int(upload_max_retries))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await client.send_file(**kwargs)
+                return
+            except FloodWaitError as exc:
+                wait_seconds = max(1, int(exc.seconds))
+                LOGGER.warning("Telegram flood wait while uploading; sleeping %ss", wait_seconds)
+                await asyncio.sleep(wait_seconds)
+                if attempt >= max_attempts:
+                    raise
+            except (RPCError, OSError, TimeoutError) as exc:
+                if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
+                    raise
+                backoff = min(
+                    upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                    upload_retry_max_delay_seconds,
+                )
+                jitter = random.uniform(0.0, upload_retry_base_delay_seconds)
+                delay = backoff + jitter
+                LOGGER.warning(
+                    "Retrying Telegram upload (attempt %s/%s) in %.2fs due to %s",
+                    attempt,
+                    max_attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+    @staticmethod
+    def _is_retryable_upload_error(exc: BaseException) -> bool:
+        if isinstance(exc, FloodWaitError):
+            return True
+        name = exc.__class__.__name__.lower()
+        return any(token in name for token in ("timeout", "connection", "rpc", "server"))
+
+    @staticmethod
+    def _handle_progress_emit_done(task: asyncio.Task[None]) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = task.exception()
+            if exc is not None:
+                LOGGER.warning("Upload progress callback failed: %s", exc)
 
     @staticmethod
     def _resolve_thumbnail_path(upload_settings: UploadSettings | None) -> Path | None:

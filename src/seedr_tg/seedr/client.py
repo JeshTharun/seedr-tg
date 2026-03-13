@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,11 +42,24 @@ class SeedrService:
         self._settings = settings
         self._repository = repository
         self._client: AsyncSeedr | None = None
+        self._http_client: httpx.AsyncClient | None = None
         self._token_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._client is not None:
             return
+        if self._http_client is None:
+            timeout = httpx.Timeout(
+                connect=self._settings.download_connect_timeout_seconds,
+                read=self._settings.download_read_timeout_seconds,
+                write=self._settings.download_write_timeout_seconds,
+                pool=self._settings.download_pool_timeout_seconds,
+            )
+            self._http_client = httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
         token_json = await self._repository.get_seedr_token_json()
         if token_json is None and self._settings.seedr_token_json:
             token_json = self._settings.seedr_token_json
@@ -57,6 +71,9 @@ class SeedrService:
         if self._client is not None:
             await self._client.close()
             self._client = None
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def begin_device_authorization(self) -> SeedrDeviceCodeRecord:
         codes = await AsyncSeedr.get_device_code()
@@ -168,18 +185,60 @@ class SeedrService:
         destination: Path,
         progress_hook: Any | None = None,
     ) -> None:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                total = int(response.headers.get("Content-Length", 0))
+        client = self._http_client
+        if client is None:
+            await self.start()
+            client = self._http_client
+        if client is None:
+            raise RuntimeError("HTTP downloader is not initialized")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        max_attempts = max(1, int(self._settings.download_max_retries))
+        for attempt in range(1, max_attempts + 1):
+            try:
                 downloaded = 0
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                async with aiofiles.open(destination, "wb") as handle:
-                    async for chunk in response.aiter_bytes(self._DOWNLOAD_CHUNK_SIZE):
-                        await handle.write(chunk)
-                        downloaded += len(chunk)
-                        if progress_hook is not None:
-                            await progress_hook(downloaded, total)
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    total = int(response.headers.get("Content-Length", 0))
+                    async with aiofiles.open(destination, "wb") as handle:
+                        async for chunk in response.aiter_bytes(self._DOWNLOAD_CHUNK_SIZE):
+                            await handle.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_hook is not None:
+                                await progress_hook(downloaded, total)
+                return
+            except (
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.HTTPStatusError,
+            ) as exc:
+                is_retryable = self._is_retryable_download_error(exc)
+                if not is_retryable or attempt >= max_attempts:
+                    raise
+                backoff = min(
+                    self._settings.download_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                    self._settings.download_retry_max_delay_seconds,
+                )
+                jitter = random.uniform(0.0, self._settings.download_retry_base_delay_seconds)
+                delay = backoff + jitter
+                LOGGER.warning(
+                    "Retrying Seedr file download (attempt %s/%s) in %.2fs due to %s",
+                    attempt,
+                    max_attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+    @staticmethod
+    def _is_retryable_download_error(exc: BaseException) -> bool:
+        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            return status == 429 or status >= 500
+        return False
 
     async def _get_client(self) -> AsyncSeedr:
         if self._client is None:

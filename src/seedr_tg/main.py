@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import os
 import signal
 
 from seedr_tg.config import load_settings
@@ -129,6 +131,11 @@ async def run() -> None:
 
 
 def main() -> None:
+    use_uvloop = os.getenv("USE_UVLOOP", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if use_uvloop:
+        with contextlib.suppress(Exception):
+            uvloop = importlib.import_module("uvloop")
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     asyncio.run(run())
 
 

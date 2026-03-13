@@ -17,6 +17,8 @@ dependencies = [
     "python-telegram-bot>=22.0,<23.0",
     "seedrcc>=2.1.0,<3.0.0",
     "telethon>=1.39.0,<2.0.0",
+    "tgcrypto>=1.2.5,<2.0.0",
+    "uvloop>=0.21.0,<0.22.0",
 ]
 
 [project.optional-dependencies]

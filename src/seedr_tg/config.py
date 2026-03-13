@@ -36,6 +36,41 @@ class Settings(BaseSettings):
     download_concurrency: int = Field(default=4, alias="DOWNLOAD_CONCURRENCY")
     upload_concurrency: int = Field(default=2, alias="UPLOAD_CONCURRENCY")
     upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
+    use_uvloop: bool = Field(default=True, alias="USE_UVLOOP")
+    download_connect_timeout_seconds: float = Field(
+        default=10.0,
+        alias="DOWNLOAD_CONNECT_TIMEOUT_SECONDS",
+    )
+    download_read_timeout_seconds: float = Field(
+        default=120.0,
+        alias="DOWNLOAD_READ_TIMEOUT_SECONDS",
+    )
+    download_write_timeout_seconds: float = Field(
+        default=30.0,
+        alias="DOWNLOAD_WRITE_TIMEOUT_SECONDS",
+    )
+    download_pool_timeout_seconds: float = Field(
+        default=10.0,
+        alias="DOWNLOAD_POOL_TIMEOUT_SECONDS",
+    )
+    download_max_retries: int = Field(default=4, alias="DOWNLOAD_MAX_RETRIES")
+    download_retry_base_delay_seconds: float = Field(
+        default=1.0,
+        alias="DOWNLOAD_RETRY_BASE_DELAY_SECONDS",
+    )
+    download_retry_max_delay_seconds: float = Field(
+        default=20.0,
+        alias="DOWNLOAD_RETRY_MAX_DELAY_SECONDS",
+    )
+    upload_max_retries: int = Field(default=4, alias="UPLOAD_MAX_RETRIES")
+    upload_retry_base_delay_seconds: float = Field(
+        default=1.0,
+        alias="UPLOAD_RETRY_BASE_DELAY_SECONDS",
+    )
+    upload_retry_max_delay_seconds: float = Field(
+        default=30.0,
+        alias="UPLOAD_RETRY_MAX_DELAY_SECONDS",
+    )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         alias="LOG_LEVEL",

@@ -171,6 +171,22 @@ class QueueRunner:
         )
         await self._sync_admin_message(job)
 
+        async def upload_progress_hook(
+            index: int,
+            total_files: int,
+            detail: str,
+            current_bytes: int,
+            total_bytes: int,
+        ) -> None:
+            await self._track_upload_progress(
+                job_id,
+                index,
+                total_files,
+                detail,
+                current_bytes,
+                total_bytes,
+            )
+
         await self._uploader.upload_files(
             file_paths,
             caption_prefix=snapshot.title or f"Job {job.id}",
@@ -178,14 +194,10 @@ class QueueRunner:
             upload_settings=await self._repository.get_upload_settings(),
             max_concurrent_uploads=self._settings.upload_concurrency,
             upload_part_size_kb=self._settings.upload_part_size_kb,
-            progress_hook=lambda index, total_files, detail, current_bytes, total_bytes: self._track_upload_progress(
-                job_id,
-                index,
-                total_files,
-                detail,
-                current_bytes,
-                total_bytes,
-            ),
+            upload_max_retries=self._settings.upload_max_retries,
+            upload_retry_base_delay_seconds=self._settings.upload_retry_base_delay_seconds,
+            upload_retry_max_delay_seconds=self._settings.upload_retry_max_delay_seconds,
+            progress_hook=upload_progress_hook,
         )
 
         job = await self._transition(
@@ -350,6 +362,8 @@ class QueueRunner:
             last_error=reason,
             current_step="Failed",
         )
+        self._speed_samples.pop((job_id, "download"), None)
+        self._speed_samples.pop((job_id, "upload"), None)
         await self._sync_admin_message(failed)
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
@@ -410,4 +424,13 @@ class QueueRunner:
         return float(current_bytes - prev_bytes) / elapsed
 
     async def _transition(self, job_id: int, **updates) -> JobRecord:
-        return await self._repository.update_job(job_id, **updates)
+        job = await self._repository.update_job(job_id, **updates)
+        if job.phase in FINAL_PHASES:
+            self._speed_samples.pop((job_id, "download"), None)
+            self._speed_samples.pop((job_id, "upload"), None)
+            self._last_progress_sync_at = {
+                key: value
+                for key, value in self._last_progress_sync_at.items()
+                if key[0] != job_id
+            }
+        return job
