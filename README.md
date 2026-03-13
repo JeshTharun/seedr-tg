@@ -89,5 +89,6 @@ seedr-tg
 - Optional high-speed downloader mode: set `USE_ARIA2_DOWNLOADS=true` and keep `aria2c` installed. If aria2 fails for any file, the app automatically falls back to the built-in HTTP downloader.
 - aria2 tuning keys: `ARIA2_SPLIT`, `ARIA2_MAX_CONNECTION_PER_SERVER`, `ARIA2_MIN_SPLIT_SIZE`, and `ARIA2_FILE_ALLOCATION`.
 - Adaptive upload governor is enabled by default and tunes upload concurrency between `UPLOAD_GOVERNOR_MIN_CONCURRENCY` and `UPLOAD_CONCURRENCY`, reducing on flood waits and scaling back up after stable uploads.
+- Upload extension filter is enforced: only `.mp4`, `.mkv`, and `.zip` files are uploaded; all other file types are skipped.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.

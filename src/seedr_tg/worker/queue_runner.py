@@ -17,6 +17,7 @@ from seedr_tg.worker.downloads import LocalDownloader
 from seedr_tg.worker.progress import format_job_status
 
 LOGGER = logging.getLogger(__name__)
+_ALLOWED_UPLOAD_EXTENSIONS = {".mp4", ".mkv", ".zip"}
 
 
 class QueueRunner:
@@ -154,6 +155,23 @@ class QueueRunner:
                 f"Downloading {name}",
             ),
         )
+        upload_file_paths = [
+            path for path in file_paths if path.suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
+        ]
+        skipped_file_names = [
+            path.name for path in file_paths if path.suffix.lower() not in _ALLOWED_UPLOAD_EXTENSIONS
+        ]
+        if skipped_file_names:
+            LOGGER.info(
+                "Skipping %s file(s) due to extension filter: %s",
+                len(skipped_file_names),
+                ", ".join(skipped_file_names),
+            )
+        if not upload_file_paths:
+            allowed = ", ".join(sorted(_ALLOWED_UPLOAD_EXTENSIONS))
+            raise RuntimeError(
+                f"No uploadable files found after extension filter. Allowed extensions: {allowed}"
+            )
 
         if snapshot.seedr_folder_id is not None:
             await self._seedr_service.delete_folder(snapshot.seedr_folder_id)
@@ -163,7 +181,7 @@ class QueueRunner:
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
             local_path=str(local_root),
-            upload_file_count=len(file_paths),
+            upload_file_count=len(upload_file_paths),
             uploaded_file_count=0,
             download_speed_bps=0.0,
             upload_speed_bps=0.0,
@@ -188,7 +206,7 @@ class QueueRunner:
             )
 
         await self._uploader.upload_files(
-            file_paths,
+            upload_file_paths,
             caption_prefix=snapshot.title or f"Job {job.id}",
             job_id=job.id,
             upload_settings=await self._repository.get_upload_settings(),
@@ -209,7 +227,7 @@ class QueueRunner:
             job_id,
             phase=JobPhase.CLEANING,
             progress_percent=100.0,
-            uploaded_file_count=len(file_paths),
+            uploaded_file_count=len(upload_file_paths),
             download_speed_bps=0.0,
             upload_speed_bps=0.0,
             current_step="Cleaning local files",
