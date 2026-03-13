@@ -24,7 +24,11 @@ from seedr_tg.db.models import (
     TelegramLoginState,
     TelegramUserSession,
 )
-from seedr_tg.telegram.uploader import TelegramPasswordRequiredError
+from seedr_tg.telegram.uploader import (
+    TelegramCodeExpiredError,
+    TelegramCodeInvalidError,
+    TelegramPasswordRequiredError,
+)
 from seedr_tg.worker.progress import format_job_status
 
 LOGGER = logging.getLogger(__name__)
@@ -210,10 +214,16 @@ class TelegramBotApp:
         if not context.args:
             await update.effective_message.reply_text("Usage: /session_code <code>")
             return
+        raw_code = "".join(context.args).strip()
+        normalized_code = raw_code.replace(" ", "").replace("-", "")
+        code = normalized_code or raw_code
         try:
-            session = await self._submit_user_session_code_callback(context.args[0])
-        except TelegramPasswordRequiredError as exc:
+            session = await self._submit_user_session_code_callback(code)
+        except (TelegramPasswordRequiredError, TelegramCodeExpiredError, TelegramCodeInvalidError) as exc:
             await update.effective_message.reply_text(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            await update.effective_message.reply_text(f"Session login failed: {exc}")
             return
         await update.effective_message.reply_text(self._format_session_success(session))
 
@@ -223,7 +233,11 @@ class TelegramBotApp:
         if not context.args:
             await update.effective_message.reply_text("Usage: /session_password <password>")
             return
-        session = await self._submit_user_session_password_callback(" ".join(context.args))
+        try:
+            session = await self._submit_user_session_password_callback(" ".join(context.args))
+        except Exception as exc:  # noqa: BLE001
+            await update.effective_message.reply_text(f"Password login failed: {exc}")
+            return
         await update.effective_message.reply_text(self._format_session_success(session))
 
     async def _handle_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

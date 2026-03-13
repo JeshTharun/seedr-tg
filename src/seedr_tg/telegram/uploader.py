@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
 from seedr_tg.db.models import TelegramLoginState, TelegramUserSession
@@ -16,6 +16,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 class TelegramPasswordRequiredError(RuntimeError):
+    pass
+
+
+class TelegramCodeExpiredError(RuntimeError):
+    pass
+
+
+class TelegramCodeInvalidError(RuntimeError):
     pass
 
 
@@ -91,6 +99,17 @@ class TelegramUploader:
             )
             raise TelegramPasswordRequiredError(
                 "Telegram account requires 2FA password. Run /session_password <password>."
+            ) from exc
+        except PhoneCodeExpiredError as exc:
+            await self._repository.clear_telegram_login_state()
+            await client.disconnect()
+            raise TelegramCodeExpiredError(
+                "Login code expired. Run /session_start <phone_number> and try /session_code again."
+            ) from exc
+        except PhoneCodeInvalidError as exc:
+            await client.disconnect()
+            raise TelegramCodeInvalidError(
+                "Invalid login code. Run /session_code with the exact code Telegram sent."
             ) from exc
         except Exception:
             await client.disconnect()
