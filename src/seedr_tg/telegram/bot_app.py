@@ -8,7 +8,7 @@ from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -64,6 +64,7 @@ class TelegramBotApp:
         self._submit_user_session_code_callback = submit_user_session_code_callback
         self._submit_user_session_password_callback = submit_user_session_password_callback
         self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
+        self._admin_message_locks: dict[int, asyncio.Lock] = {}
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
@@ -112,30 +113,40 @@ class TelegramBotApp:
         text: str,
         job_id: int | None = None,
     ) -> None:
-        cached = self._admin_message_cache.get(message_id)
-        if cached == (text, job_id):
-            return
-        reply_markup = None
-        if job_id is not None:
-            reply_markup = InlineKeyboardMarkup.from_button(
-                InlineKeyboardButton(text="Cancel current", callback_data=f"cancel:{job_id}")
-            )
-        try:
-            await self._application.bot.edit_message_text(
-                chat_id=self._admin_chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-            self._admin_message_cache[message_id] = (text, job_id)
-        except BadRequest as exc:
-            if "message is not modified" in str(exc).lower():
-                self._admin_message_cache[message_id] = (text, job_id)
-                LOGGER.debug("Skipped no-op admin message edit for message_id=%s", message_id)
+        lock = self._admin_message_locks.setdefault(message_id, asyncio.Lock())
+        async with lock:
+            cached = self._admin_message_cache.get(message_id)
+            if cached == (text, job_id):
                 return
-            raise
+            reply_markup = None
+            if job_id is not None:
+                reply_markup = InlineKeyboardMarkup.from_button(
+                    InlineKeyboardButton(text="Cancel current", callback_data=f"cancel:{job_id}")
+                )
+            try:
+                await self._application.bot.edit_message_text(
+                    chat_id=self._admin_chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+                self._admin_message_cache[message_id] = (text, job_id)
+            except RetryAfter as exc:
+                LOGGER.warning(
+                    "Telegram flood control on admin message update. message_id=%s retry_after=%s",
+                    message_id,
+                    exc.retry_after,
+                )
+                await asyncio.sleep(float(exc.retry_after))
+                return
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    self._admin_message_cache[message_id] = (text, job_id)
+                    LOGGER.debug("Skipped no-op admin message edit for message_id=%s", message_id)
+                    return
+                raise
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context

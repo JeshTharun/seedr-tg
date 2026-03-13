@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
+import time
 
 from seedr_tg.config import Settings
 from seedr_tg.db.models import FINAL_PHASES, JobPhase, JobRecord
@@ -37,6 +38,7 @@ class QueueRunner:
         self._downloader = LocalDownloader(seedr_service)
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
+        self._last_progress_sync_at: dict[tuple[int, str], float] = {}
 
     async def enqueue_magnet(
         self,
@@ -230,7 +232,8 @@ class QueueRunner:
             progress_percent=percent,
             current_step=step,
         )
-        await self._sync_admin_message(job)
+        if self._should_sync_progress(job_id, phase, percent):
+            await self._sync_admin_message_best_effort(job)
         await self._check_cancellation(job_id)
 
     async def _track_upload_progress(
@@ -249,7 +252,8 @@ class QueueRunner:
             upload_file_count=total_files,
             current_step=detail,
         )
-        await self._sync_admin_message(job)
+        if self._should_sync_progress(job_id, JobPhase.UPLOADING_TELEGRAM, percent):
+            await self._sync_admin_message_best_effort(job)
         await self._check_cancellation(job_id)
 
     async def _fetch_remote_files_with_retry(self, folder_id: int | None):
@@ -300,6 +304,18 @@ class QueueRunner:
     async def _sync_admin_message(self, job: JobRecord) -> None:
         text = format_job_status(job)
         if job.admin_message_id is None:
+            # Avoid duplicate status messages when bot message creation and worker updates race.
+            latest = await self._repository.get_job(job.id)
+            if latest.admin_message_id is None:
+                await asyncio.sleep(0.25)
+                latest = await self._repository.get_job(job.id)
+            if latest.admin_message_id is not None:
+                await self._bot_app.update_admin_message(
+                    latest.admin_message_id,
+                    text,
+                    None if job.phase in FINAL_PHASES else job.id,
+                )
+                return
             post_job_id = job.id if job.phase not in FINAL_PHASES else None
             message_id = await self._bot_app.post_admin_message(text, post_job_id)
             await self._repository.update_job(job.id, admin_message_id=message_id)
@@ -309,6 +325,23 @@ class QueueRunner:
             text,
             None if job.phase in FINAL_PHASES else job.id,
         )
+
+    async def _sync_admin_message_best_effort(self, job: JobRecord) -> None:
+        try:
+            await self._sync_admin_message(job)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Skipped admin message update due to transient error: %s", exc)
+
+    def _should_sync_progress(self, job_id: int, phase: JobPhase, percent: float) -> bool:
+        if percent >= 100.0:
+            return True
+        key = (job_id, phase.value)
+        now = time.monotonic()
+        last = self._last_progress_sync_at.get(key)
+        if last is not None and (now - last) < self._settings.progress_update_interval_seconds:
+            return False
+        self._last_progress_sync_at[key] = now
+        return True
 
     async def _transition(self, job_id: int, **updates) -> JobRecord:
         return await self._repository.update_job(job_id, **updates)
