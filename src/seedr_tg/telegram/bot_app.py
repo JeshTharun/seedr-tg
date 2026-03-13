@@ -186,9 +186,7 @@ class TelegramBotApp:
         if job is None:
             await self.post_admin_message("<b>Ignored duplicate magnet</b>")
             return
-        text = format_job_status(job)
-        admin_message_id = await self.post_admin_message(text, job.id)
-        await self._set_admin_message_id_callback(job.id, admin_message_id)
+        # Queue runner owns lifecycle status messages to avoid duplicate posts from race conditions.
         await asyncio.sleep(0)
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
