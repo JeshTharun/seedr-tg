@@ -199,7 +199,7 @@ class TelegramBotApp:
             text=(
                 "Login code sent.\n"
                 f"Phone: {escape(state.phone_number)}\n"
-                "Reply with /session_code <code>."
+                "Reply with /session_code &lt;code&gt;."
             ),
             parse_mode=ParseMode.HTML,
         )

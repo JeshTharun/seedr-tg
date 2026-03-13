@@ -89,6 +89,10 @@ class SeedrService:
         contents = await client.list_contents()
         torrent = self._find_torrent(contents.torrents, torrent_id)
         folder = self._find_folder(contents.folders, (torrent.folder if torrent else None) or known_folder_id)
+        if folder is None and torrent is None and known_folder_id is None and torrent_id is not None:
+            # Seedr can drop completed torrents before files/folder metadata is fully linked.
+            # If exactly one folder remains at root, treat it as the completed torrent output.
+            folder = self._single_folder_fallback(contents.folders)
         total_size_bytes = folder.size if folder else (torrent.size if torrent else None)
         title = folder.name if folder else (torrent.name if torrent else None)
         return ResolvedTorrent(
@@ -201,3 +205,9 @@ class SeedrService:
             if str(folder.id) == str(folder_id):
                 return folder
         return None
+
+    @staticmethod
+    def _single_folder_fallback(folders: list[Folder]) -> Folder | None:
+        if len(folders) != 1:
+            return None
+        return folders[0]
