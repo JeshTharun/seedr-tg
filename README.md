@@ -26,12 +26,56 @@ Copy `.env.example` to `.env` and fill these values:
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
 
-## Run
+## Run (OS-specific)
+
+### Linux (Ubuntu/Debian)
+
+If `python` is missing (common on fresh servers), use `python3`.
 
 ```bash
-python -m venv .venv
+apt update
+apt install -y python3 python3-venv python3-pip
+
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+seedr-tg
+```
+
+Optional: if you want `python` to map to Python 3:
+
+```bash
+apt install -y python-is-python3
+```
+
+### macOS
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+seedr-tg
+```
+
+### Windows (PowerShell)
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+seedr-tg
+```
+
+### Windows (cmd.exe)
+
+```bat
+py -3 -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 seedr-tg
 ```
 
