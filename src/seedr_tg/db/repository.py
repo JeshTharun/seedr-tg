@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import fields
+from dataclasses import asdict, fields
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -181,7 +181,7 @@ class JobRepository:
         )
         await self._state.replace_one(
             {"_id": "seedr_device_code"},
-            {"_id": "seedr_device_code", **record.__dict__},
+            {"_id": "seedr_device_code", **asdict(record)},
             upsert=True,
         )
         return record
@@ -227,7 +227,7 @@ class JobRepository:
         )
         await self._state.replace_one(
             {"_id": "telegram_login_state"},
-            {"_id": "telegram_login_state", **record.__dict__},
+            {"_id": "telegram_login_state", **asdict(record)},
             upsert=True,
         )
         return record
@@ -264,7 +264,7 @@ class JobRepository:
         )
         await self._state.replace_one(
             {"_id": "telegram_user_session"},
-            {"_id": "telegram_user_session", **record.__dict__},
+            {"_id": "telegram_user_session", **asdict(record)},
             upsert=True,
         )
         return record

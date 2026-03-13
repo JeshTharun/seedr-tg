@@ -8,6 +8,7 @@ from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -110,14 +111,20 @@ class TelegramBotApp:
             reply_markup = InlineKeyboardMarkup.from_button(
                 InlineKeyboardButton(text="Cancel current", callback_data=f"cancel:{job_id}")
             )
-        await self._application.bot.edit_message_text(
-            chat_id=self._admin_chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        try:
+            await self._application.bot.edit_message_text(
+                chat_id=self._admin_chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                LOGGER.debug("Skipped no-op admin message edit for message_id=%s", message_id)
+                return
+            raise
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
