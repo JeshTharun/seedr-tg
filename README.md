@@ -82,6 +82,55 @@ python -m pip install -r requirements.txt
 seedr-tg
 ```
 
+## PM2 Integration (Linux)
+
+Use this when you want the bot to run as a managed background service with auto-restart.
+
+1. Install PM2:
+
+```bash
+npm install -g pm2
+```
+
+2. Start the bot with PM2 from your project directory:
+
+```bash
+cd ~/seedr-tg
+pm2 start .venv/bin/seedr-tg --name seedr-tg --cwd ~/seedr-tg
+```
+
+3. Check status and logs:
+
+```bash
+pm2 status
+pm2 logs seedr-tg
+```
+
+4. Persist across reboots:
+
+```bash
+pm2 save
+pm2 startup
+```
+
+Run the command printed by `pm2 startup`, then run `pm2 save` again.
+
+5. Restart after code or env updates:
+
+```bash
+cd ~/seedr-tg
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+pm2 restart seedr-tg
+```
+
+6. Stop or remove the process:
+
+```bash
+pm2 stop seedr-tg
+pm2 delete seedr-tg
+```
+
 ## Notes
 
 - Use `/session_start <phone>`, `/session_code <code>`, and optionally `/session_password <password>` in the admin chat to create the Telegram premium uploader session and store it in MongoDB.
