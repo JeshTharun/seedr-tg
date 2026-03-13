@@ -40,6 +40,7 @@ class QueueRunner:
         self._wake_event = asyncio.Event()
         self._last_progress_sync_at: dict[tuple[int, str], float] = {}
         self._speed_samples: dict[tuple[int, str], tuple[float, int]] = {}
+        self._cancel_processed_jobs: set[int] = set()
 
     async def enqueue_magnet(
         self,
@@ -311,6 +312,10 @@ class QueueRunner:
         job = await self._repository.get_job(job_id)
         if not job.cancel_requested:
             return
+        if job_id in self._cancel_processed_jobs or job.phase == JobPhase.CANCELED:
+            raise asyncio.CancelledError(f"Job {job_id} canceled")
+
+        self._cancel_processed_jobs.add(job_id)
         await self._seedr_service.delete_torrent(job.seedr_torrent_id)
         await self._seedr_service.delete_folder(job.seedr_folder_id)
         if job.local_path:
