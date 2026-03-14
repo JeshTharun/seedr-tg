@@ -39,6 +39,7 @@ class RemoteFile:
 
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+    _REMOTE_FILE_LINK_TTL_SECONDS = 24 * 60 * 60
     _HTTP_TIMEOUT_CONNECT_SECONDS = 10.0
     _HTTP_TIMEOUT_READ_SECONDS = 120.0
     _HTTP_TIMEOUT_WRITE_SECONDS = 30.0
@@ -57,6 +58,7 @@ class SeedrService:
         self._client: AsyncSeedr | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._token_lock = asyncio.Lock()
+        self._remote_files_cache: dict[str, tuple[float, list[RemoteFile]]] = {}
 
     async def start(self) -> None:
         if self._client is not None:
@@ -153,6 +155,14 @@ class SeedrService:
         return await client.get_torrent_progress(progress_url)
 
     async def fetch_remote_files(self, folder_id: int | None = None) -> list[RemoteFile]:
+        cache_key = self._remote_files_cache_key(folder_id)
+        cached = self._remote_files_cache.get(cache_key)
+        now = asyncio.get_running_loop().time()
+        if cached is not None:
+            cached_at, files = cached
+            if (now - cached_at) < self._REMOTE_FILE_LINK_TTL_SECONDS and files:
+                return list(files)
+
         client = await self._get_client()
         remote_files: list[RemoteFile] = []
         visited: set[str] = set()
@@ -178,6 +188,8 @@ class SeedrService:
                 await walk(int(child_folder.id))
 
         await walk(folder_id)
+        if remote_files:
+            self._remote_files_cache[cache_key] = (now, list(remote_files))
         return remote_files
 
     async def delete_torrent(self, torrent_id: int | None) -> None:
@@ -191,6 +203,7 @@ class SeedrService:
             return
         client = await self._get_client()
         await client.delete_folder(str(folder_id))
+        self._remote_files_cache.pop(self._remote_files_cache_key(folder_id), None)
 
     async def ensure_under_limit(self, total_size_bytes: int | None) -> None:
         if total_size_bytes is None:
@@ -403,6 +416,10 @@ class SeedrService:
         self._client = client
         if old_client is not None:
             await old_client.close()
+
+    @staticmethod
+    def _remote_files_cache_key(folder_id: int | None) -> str:
+        return f"folder:{folder_id}" if folder_id is not None else "folder:root"
 
     async def _persist_token(self, token: Token) -> None:
         async with self._token_lock:
