@@ -18,6 +18,7 @@ from telethon.errors import (
     RPCError,
     SessionPasswordNeededError,
 )
+from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
 from telethon.sessions import StringSession
 
 from seedr_tg.db.models import (
@@ -50,6 +51,16 @@ class TelegramUploader:
     _UPLOAD_GOVERNOR_ENABLED = True
     _UPLOAD_GOVERNOR_MIN_CONCURRENCY = 1
     _UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES = 6
+
+    @staticmethod
+    def _create_client(session_string: str, api_id: int, api_hash: str) -> TelegramClient:
+        # Abridged transport reduces MTProto framing overhead vs TcpFull.
+        return TelegramClient(
+            StringSession(session_string),
+            api_id,
+            api_hash,
+            connection=ConnectionTcpAbridged,
+        )
 
     def __init__(
         self,
@@ -90,7 +101,7 @@ class TelegramUploader:
             self._client = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
-        client = TelegramClient(StringSession(), self._api_id, self._api_hash)
+        client = self._create_client("", self._api_id, self._api_hash)
         await client.connect()
         try:
             sent = await client.send_code_request(phone_number)
@@ -108,7 +119,7 @@ class TelegramUploader:
         state = await self._repository.get_telegram_login_state()
         if state is None:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
-        client = TelegramClient(StringSession(state.session_string), self._api_id, self._api_hash)
+        client = self._create_client(state.session_string, self._api_id, self._api_hash)
         await client.connect()
         try:
             await client.sign_in(
@@ -148,7 +159,7 @@ class TelegramUploader:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
         if not state.password_required:
             raise RuntimeError("Current Telegram login does not require a password.")
-        client = TelegramClient(StringSession(state.session_string), self._api_id, self._api_hash)
+        client = self._create_client(state.session_string, self._api_id, self._api_hash)
         await client.connect()
         try:
             await client.sign_in(password=password)
@@ -455,7 +466,7 @@ class TelegramUploader:
         return self._client
 
     async def _connect_client(self, session_string: str) -> TelegramClient:
-        client = TelegramClient(StringSession(session_string), self._api_id, self._api_hash)
+        client = self._create_client(session_string, self._api_id, self._api_hash)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
