@@ -10,7 +10,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from telegram import Bot
+from telegram import Bot, InputFile
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telethon import TelegramClient
@@ -382,43 +382,54 @@ class TelegramUploader:
         for attempt in range(1, max_attempts + 1):
             try:
                 with file_path.open("rb") as handle:
+                    upload_input = InputFile(
+                        handle,
+                        filename=file_path.name,
+                        read_file_handle=False,
+                    )
                     if media_type == UploadMediaType.DOCUMENT:
                         if thumb_path is not None and thumb_path.exists():
                             with thumb_path.open("rb") as thumb_handle:
+                                thumb_input = InputFile(
+                                    thumb_handle,
+                                    filename=thumb_path.name,
+                                    read_file_handle=False,
+                                )
                                 await bot.send_document(
                                     chat_id=self._target_chat_id,
-                                    document=handle,
-                                    filename=file_path.name,
+                                    document=upload_input,
                                     caption=caption,
                                     parse_mode=bot_parse_mode,
-                                    thumbnail=thumb_handle,
+                                    thumbnail=thumb_input,
                                 )
                         else:
                             await bot.send_document(
                                 chat_id=self._target_chat_id,
-                                document=handle,
-                                filename=file_path.name,
+                                document=upload_input,
                                 caption=caption,
                                 parse_mode=bot_parse_mode,
                             )
                     elif thumb_path is not None and thumb_path.exists():
                         with thumb_path.open("rb") as thumb_handle:
+                            thumb_input = InputFile(
+                                thumb_handle,
+                                filename=thumb_path.name,
+                                read_file_handle=False,
+                            )
                             await bot.send_video(
                                 chat_id=self._target_chat_id,
-                                video=handle,
+                                video=upload_input,
                                 caption=caption,
                                 parse_mode=bot_parse_mode,
-                                filename=file_path.name,
                                 supports_streaming=True,
-                                thumbnail=thumb_handle,
+                                thumbnail=thumb_input,
                             )
                     else:
                         await bot.send_video(
                             chat_id=self._target_chat_id,
-                            video=handle,
+                            video=upload_input,
                             caption=caption,
                             parse_mode=bot_parse_mode,
-                            filename=file_path.name,
                             supports_streaming=True,
                         )
 
