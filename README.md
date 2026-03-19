@@ -143,3 +143,22 @@ pm2 delete seedr-tg
 - Upload extension filter is enforced: only `.mp4`, `.mkv`, and `.zip` files are uploaded; all other file types are skipped.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
+
+## Web UI (Magnet Submit)
+
+The Python backend now also starts a local web API on `http://127.0.0.1:8787` with:
+
+- `POST /api/magnets` to enqueue a magnet link.
+- `GET /api/jobs` to read active queue status.
+
+Frontend app is in `frontend/` and uses shadcn components.
+
+Run it in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then open `http://localhost:3000` and submit magnets from the web UI. The existing Python queue/download/upload pipeline is unchanged, so uploads to Telegram continue automatically.
