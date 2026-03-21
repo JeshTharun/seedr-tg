@@ -17,6 +17,8 @@ class LocalDownloader:
         concurrency: int = 1,
         progress_hook=None,
     ) -> list[Path]:
+        if not remote_files:
+            return []
         downloaded_paths: list[Path] = []
         total_size = sum(remote.size for remote in remote_files)
         lock = asyncio.Lock()
@@ -48,6 +50,13 @@ class LocalDownloader:
             return destination
 
         tasks = [asyncio.create_task(download_one(remote)) for remote in remote_files]
-        results = await asyncio.gather(*tasks)
+        try:
+            results = await asyncio.gather(*tasks)
+        except Exception:  # noqa: BLE001
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         downloaded_paths.extend(results)
         return downloaded_paths

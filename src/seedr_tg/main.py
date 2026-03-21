@@ -35,6 +35,9 @@ async def run() -> None:
         bootstrap_session_string=settings.telegram_user_session_string,
         upload_retry_base_delay_seconds=settings.upload_retry_base_delay_seconds,
         upload_retry_max_delay_seconds=settings.upload_retry_max_delay_seconds,
+        upload_governor_enabled=settings.upload_governor_enabled,
+        upload_governor_min_concurrency=settings.upload_governor_min_concurrency,
+        upload_governor_scale_up_after_stable_files=settings.upload_governor_scale_up_after_stable_files,
     )
     await uploader.start()
 

@@ -37,6 +37,10 @@ class RemoteFile:
     download_url: str
 
 
+class DownloadIntegrityError(RuntimeError):
+    pass
+
+
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -106,12 +110,24 @@ class SeedrService:
         result = await client.add_torrent(magnet_link=magnet_link)
         return result.user_torrent_id
 
-    async def resolve_torrent(self, torrent_id: int | None, known_folder_id: int | None = None) -> ResolvedTorrent:
+    async def resolve_torrent(
+        self,
+        torrent_id: int | None,
+        known_folder_id: int | None = None,
+    ) -> ResolvedTorrent:
         client = await self._get_client()
         contents = await client.list_contents()
         torrent = self._find_torrent(contents.torrents, torrent_id)
-        folder = self._find_folder(contents.folders, (torrent.folder if torrent else None) or known_folder_id)
-        if folder is None and torrent is None and known_folder_id is None and torrent_id is not None:
+        folder = self._find_folder(
+            contents.folders,
+            (torrent.folder if torrent else None) or known_folder_id,
+        )
+        if (
+            folder is None
+            and torrent is None
+            and known_folder_id is None
+            and torrent_id is not None
+        ):
             # Seedr can drop completed torrents before files/folder metadata is fully linked.
             # If exactly one folder remains at root, treat it as the completed torrent output.
             folder = self._single_folder_fallback(contents.folders)
@@ -197,6 +213,7 @@ class SeedrService:
                 )
                 return
             except (RuntimeError, OSError, ValueError) as exc:
+                self._cleanup_partial_download_artifacts(destination)
                 LOGGER.warning(
                     "aria2 download failed for %s, falling back to httpx downloader: %s",
                     destination.name,
@@ -226,13 +243,21 @@ class SeedrService:
                             downloaded += len(chunk)
                             if progress_hook is not None:
                                 await progress_hook(downloaded, total)
+                if total > 0 and downloaded != total:
+                    raise DownloadIntegrityError(
+                        "size mismatch for "
+                        f"{destination.name}: downloaded={downloaded} expected={total}"
+                    )
                 return
             except (
                 httpx.TimeoutException,
                 httpx.ConnectError,
                 httpx.ReadError,
                 httpx.HTTPStatusError,
+                DownloadIntegrityError,
+                OSError,
             ) as exc:
+                self._cleanup_partial_download_artifacts(destination)
                 is_retryable = self._is_retryable_download_error(exc)
                 if not is_retryable or attempt >= max_attempts:
                     raise
@@ -297,18 +322,33 @@ class SeedrService:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        if progress_hook is not None:
-            await self._track_aria2_progress(proc, destination, total_bytes, progress_hook)
+        try:
+            if progress_hook is not None:
+                await self._track_aria2_progress(proc, destination, total_bytes, progress_hook)
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            self._cleanup_partial_download_artifacts(destination)
+            raise
 
-        stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
             stdout_text = stdout.decode("utf-8", errors="ignore").strip()
             details = stderr_text or stdout_text or "unknown error"
+            self._cleanup_partial_download_artifacts(destination)
             raise RuntimeError(f"aria2 exited with code {proc.returncode}: {details}")
 
+        final_size = destination.stat().st_size if destination.exists() else 0
+        if total_bytes > 0 and final_size != total_bytes:
+            self._cleanup_partial_download_artifacts(destination)
+            raise DownloadIntegrityError(
+                "aria2 size mismatch for "
+                f"{destination.name}: downloaded={final_size} expected={total_bytes}"
+            )
         if progress_hook is not None:
-            final_size = destination.stat().st_size if destination.exists() else 0
             await progress_hook(final_size, total_bytes or final_size)
 
     async def _track_aria2_progress(
@@ -356,12 +396,24 @@ class SeedrService:
 
     @staticmethod
     def _is_retryable_download_error(exc: BaseException) -> bool:
-        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)):
+        if isinstance(exc, httpx.TimeoutException | httpx.ConnectError | httpx.ReadError):
+            return True
+        if isinstance(exc, DownloadIntegrityError):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             return status == 429 or status >= 500
         return False
+
+    @staticmethod
+    def _cleanup_partial_download_artifacts(destination: Path) -> None:
+        with contextlib.suppress(Exception):
+            if destination.exists():
+                destination.unlink()
+        with contextlib.suppress(Exception):
+            partial_state = destination.with_suffix(destination.suffix + ".aria2")
+            if partial_state.exists():
+                partial_state.unlink()
 
     async def _get_client(self) -> AsyncSeedr:
         if self._client is None:

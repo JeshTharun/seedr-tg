@@ -81,6 +81,9 @@ class TelegramUploader:
         bootstrap_session_string: str | None = None,
         upload_retry_base_delay_seconds: float | None = None,
         upload_retry_max_delay_seconds: float | None = None,
+        upload_governor_enabled: bool | None = None,
+        upload_governor_min_concurrency: int | None = None,
+        upload_governor_scale_up_after_stable_files: int | None = None,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
@@ -97,6 +100,23 @@ class TelegramUploader:
             float(upload_retry_max_delay_seconds)
             if upload_retry_max_delay_seconds is not None
             else self._UPLOAD_RETRY_MAX_DELAY_SECONDS
+        )
+        self._upload_governor_enabled = (
+            bool(upload_governor_enabled)
+            if upload_governor_enabled is not None
+            else self._UPLOAD_GOVERNOR_ENABLED
+        )
+        self._upload_governor_min_concurrency = max(
+            1,
+            int(upload_governor_min_concurrency)
+            if upload_governor_min_concurrency is not None
+            else self._UPLOAD_GOVERNOR_MIN_CONCURRENCY,
+        )
+        self._upload_governor_scale_up_after_stable_files = max(
+            1,
+            int(upload_governor_scale_up_after_stable_files)
+            if upload_governor_scale_up_after_stable_files is not None
+            else self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES,
         )
         self._client: TelegramClient | None = None
         self._bot: Bot | None = None
@@ -130,7 +150,8 @@ class TelegramUploader:
                 await self._bot.close()
             except RetryAfter as exc:
                 LOGGER.warning(
-                    "Skipping bot.close() due to Telegram flood wait during shutdown: retry_after=%s",
+                    "Skipping bot.close() due to Telegram flood wait during shutdown: "
+                    "retry_after=%s",
                     exc.retry_after,
                 )
             except (TelegramError, NetworkError, TimedOut) as exc:
@@ -219,10 +240,10 @@ class TelegramUploader:
     ) -> None:
         total_files = len(file_paths)
         requested_upload_concurrency = max(1, int(max_concurrent_uploads))
-        min_upload_concurrency = self._UPLOAD_GOVERNOR_MIN_CONCURRENCY
+        min_upload_concurrency = self._upload_governor_min_concurrency
         effective_upload_concurrency = await self._determine_effective_upload_concurrency(
             requested_upload_concurrency=requested_upload_concurrency,
-            upload_governor_enabled=self._UPLOAD_GOVERNOR_ENABLED,
+            upload_governor_enabled=self._upload_governor_enabled,
             upload_governor_min_concurrency=min_upload_concurrency,
         )
         semaphore = asyncio.Semaphore(effective_upload_concurrency)
@@ -314,13 +335,11 @@ class TelegramUploader:
                         completed_files=completed_files,
                         total_files=total_files,
                     )
-                if self._UPLOAD_GOVERNOR_ENABLED:
+                if self._upload_governor_enabled:
                     await self._record_upload_outcome(
                         requested_upload_concurrency=requested_upload_concurrency,
                         upload_governor_min_concurrency=min_upload_concurrency,
-                        upload_governor_scale_up_after_stable_files=(
-                            self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES
-                        ),
+                        upload_governor_scale_up_after_stable_files=self._upload_governor_scale_up_after_stable_files,
                         had_flood_wait=had_flood_wait,
                         retry_count=retry_count,
                     )
@@ -336,10 +355,20 @@ class TelegramUploader:
                     1,
                     1,
                 )
+            if progress_emit_task is not None and not progress_emit_task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await progress_emit_task
             LOGGER.info("Uploaded %s to Telegram", file_path)
 
         tasks = [asyncio.create_task(upload_one(file_path)) for file_path in file_paths]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        except Exception:  # noqa: BLE001
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _send_file_with_retry(
         self,
@@ -350,9 +379,10 @@ class TelegramUploader:
     ) -> tuple[bool, int]:
         max_attempts = max(1, int(upload_max_retries))
         had_flood_wait = False
+        active_client = client
         for attempt in range(1, max_attempts + 1):
             try:
-                await client.send_file(**kwargs)
+                await active_client.send_file(**kwargs)
                 return had_flood_wait, attempt - 1
             except FloodWaitError as exc:
                 had_flood_wait = True
@@ -364,6 +394,8 @@ class TelegramUploader:
             except (RPCError, OSError, TimeoutError) as exc:
                 if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
                     raise
+                if isinstance(exc, OSError | TimeoutError):
+                    active_client = await self._reset_telethon_client_for_retry(active_client, exc)
                 backoff = min(
                     self._upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
                     self._upload_retry_max_delay_seconds,
@@ -393,18 +425,17 @@ class TelegramUploader:
         completed_files: int,
         total_files: int,
     ) -> tuple[bool, int]:
-        bot = self._bot
-        if bot is None:
-            self._bot = Bot(self._bot_token)
-            bot = self._bot
-        if bot is None:
-            raise RuntimeError("Telegram bot client is not initialized")
-
         max_attempts = max(1, int(upload_max_retries))
         had_flood_wait = False
         total_bytes = file_path.stat().st_size if file_path.exists() else 0
         bot_parse_mode = self._resolve_bot_parse_mode(parse_mode)
         for attempt in range(1, max_attempts + 1):
+            bot = self._bot
+            if bot is None:
+                self._bot = Bot(self._bot_token)
+                bot = self._bot
+            if bot is None:
+                raise RuntimeError("Telegram bot client is not initialized")
             try:
                 with file_path.open("rb") as handle:
                     upload_input = InputFile(
@@ -493,7 +524,7 @@ class TelegramUploader:
             except (TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
                 if attempt >= max_attempts:
                     raise
-                if isinstance(exc, (TimedOut, NetworkError, TimeoutError, OSError)):
+                if isinstance(exc, TimedOut | NetworkError | TimeoutError | OSError):
                     await self._reset_bot_client_for_retry(exc)
                 backoff = min(
                     self._upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
@@ -512,13 +543,27 @@ class TelegramUploader:
         return had_flood_wait, max_attempts - 1
 
     async def _reset_bot_client_for_retry(self, exc: BaseException) -> None:
-        if self._bot is None:
-            self._bot = Bot(self._bot_token)
+        old_bot = self._bot
+        self._bot = Bot(self._bot_token)
+        if old_bot is None:
             return
         LOGGER.warning("Resetting bot client after upload network error: %s", repr(exc))
         with contextlib.suppress(Exception):
-            await self._bot.close()
-        self._bot = Bot(self._bot_token)
+            await asyncio.wait_for(old_bot.close(), timeout=10.0)
+
+    async def _reset_telethon_client_for_retry(
+        self,
+        client: TelegramClient,
+        exc: BaseException,
+    ) -> TelegramClient:
+        LOGGER.warning("Resetting Telethon client after upload network error: %s", repr(exc))
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+        with contextlib.suppress(Exception):
+            await client.connect()
+            if await client.is_user_authorized():
+                return client
+        return await self._get_client()
 
     async def _determine_effective_upload_concurrency(
         self,
