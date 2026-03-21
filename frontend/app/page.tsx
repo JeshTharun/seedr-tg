@@ -7,7 +7,6 @@ import {
   Inbox,
   LoaderCircle,
   RefreshCcw,
-  Server,
 } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -19,7 +18,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 type QueueJob = {
@@ -40,7 +38,7 @@ type MagnetResponse = {
 const API_BASE = process.env.NEXT_PUBLIC_SEEDR_API_BASE_URL ?? "http://127.0.0.1:8787";
 
 export default function Home() {
-  const [apiBase, setApiBase] = useState(API_BASE);
+  const apiBase = API_BASE;
   const [magnet, setMagnet] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
