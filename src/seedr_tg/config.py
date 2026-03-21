@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
     mongodb_database: str = "seedr_tg"
     web_api_allowed_origins_raw: str = Field(
-        default="http://localhost:3000,http://127.0.0.1:3000",
+        default="http://localhost:3000,http://127.0.0.1:3000,https://seedr-tg.vercel.app",
         alias="WEB_API_ALLOWED_ORIGINS",
     )
     download_root: Path = Path("downloads")
@@ -69,7 +69,11 @@ class Settings(BaseSettings):
         parsed = tuple(origin for origin in items if origin)
         if parsed:
             return parsed
-        return ("http://localhost:3000", "http://127.0.0.1:3000")
+        return (
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://seedr-tg.vercel.app",
+        )
 
 
 def load_settings() -> Settings:
