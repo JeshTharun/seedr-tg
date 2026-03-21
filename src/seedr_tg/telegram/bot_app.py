@@ -122,13 +122,27 @@ class TelegramBotApp:
             reply_markup = InlineKeyboardMarkup.from_button(
                 InlineKeyboardButton(text="Cancel current", callback_data=f"cancel:{job_id}")
             )
-        message = await self._application.bot.send_message(
-            chat_id=self._admin_chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                message = await self._application.bot.send_message(
+                    chat_id=self._admin_chat_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+                break
+            except RetryAfter as exc:
+                wait_seconds = float(exc.retry_after)
+                LOGGER.warning(
+                    "Telegram flood control on admin message post. retry_after=%s",
+                    wait_seconds,
+                )
+                if attempts >= 3:
+                    raise
+                await asyncio.sleep(wait_seconds)
         self._admin_message_cache[message.message_id] = (text, job_id)
         return message.message_id
 
@@ -428,11 +442,25 @@ class TelegramBotApp:
         await query.answer()
         _, raw_job_id = query.data.split(":", maxsplit=1)
         job = await self._cancel_callback(int(raw_job_id))
-        await query.edit_message_text(
-            text=format_job_status(job),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                await query.edit_message_text(
+                    text=format_job_status(job),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                break
+            except RetryAfter as exc:
+                wait_seconds = float(exc.retry_after)
+                LOGGER.warning(
+                    "Telegram flood control on cancel message edit. retry_after=%s",
+                    wait_seconds,
+                )
+                if attempts >= 3:
+                    raise
+                await asyncio.sleep(wait_seconds)
 
     @staticmethod
     def _extract_magnet(text: str) -> str | None:
