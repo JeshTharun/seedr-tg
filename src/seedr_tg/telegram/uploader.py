@@ -79,6 +79,8 @@ class TelegramUploader:
         target_chat_id: int,
         repository: JobRepository,
         bootstrap_session_string: str | None = None,
+        upload_retry_base_delay_seconds: float | None = None,
+        upload_retry_max_delay_seconds: float | None = None,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
@@ -86,6 +88,16 @@ class TelegramUploader:
         self._target_chat_id = target_chat_id
         self._repository = repository
         self._bootstrap_session_string = bootstrap_session_string
+        self._upload_retry_base_delay_seconds = (
+            float(upload_retry_base_delay_seconds)
+            if upload_retry_base_delay_seconds is not None
+            else self._UPLOAD_RETRY_BASE_DELAY_SECONDS
+        )
+        self._upload_retry_max_delay_seconds = (
+            float(upload_retry_max_delay_seconds)
+            if upload_retry_max_delay_seconds is not None
+            else self._UPLOAD_RETRY_MAX_DELAY_SECONDS
+        )
         self._client: TelegramClient | None = None
         self._bot: Bot | None = None
         self._governor_lock = asyncio.Lock()
@@ -353,10 +365,10 @@ class TelegramUploader:
                 if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
                     raise
                 backoff = min(
-                    self._UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
-                    self._UPLOAD_RETRY_MAX_DELAY_SECONDS,
+                    self._upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                    self._upload_retry_max_delay_seconds,
                 )
-                jitter = random.uniform(0.0, self._UPLOAD_RETRY_BASE_DELAY_SECONDS)
+                jitter = random.uniform(0.0, self._upload_retry_base_delay_seconds)
                 delay = backoff + jitter
                 LOGGER.warning(
                     "Retrying Telegram upload (attempt %s/%s) in %.2fs due to %s",
@@ -481,11 +493,13 @@ class TelegramUploader:
             except (TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
                 if attempt >= max_attempts:
                     raise
+                if isinstance(exc, (TimedOut, NetworkError, TimeoutError, OSError)):
+                    await self._reset_bot_client_for_retry(exc)
                 backoff = min(
-                    self._UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
-                    self._UPLOAD_RETRY_MAX_DELAY_SECONDS,
+                    self._upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                    self._upload_retry_max_delay_seconds,
                 )
-                jitter = random.uniform(0.0, self._UPLOAD_RETRY_BASE_DELAY_SECONDS)
+                jitter = random.uniform(0.0, self._upload_retry_base_delay_seconds)
                 delay = backoff + jitter
                 LOGGER.warning(
                     "Retrying bot upload (attempt %s/%s) in %.2fs due to %s",
@@ -496,6 +510,15 @@ class TelegramUploader:
                 )
                 await asyncio.sleep(delay)
         return had_flood_wait, max_attempts - 1
+
+    async def _reset_bot_client_for_retry(self, exc: BaseException) -> None:
+        if self._bot is None:
+            self._bot = Bot(self._bot_token)
+            return
+        LOGGER.warning("Resetting bot client after upload network error: %s", repr(exc))
+        with contextlib.suppress(Exception):
+            await self._bot.close()
+        self._bot = Bot(self._bot_token)
 
     async def _determine_effective_upload_concurrency(
         self,

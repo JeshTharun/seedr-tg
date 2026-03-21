@@ -33,6 +33,8 @@ async def run() -> None:
         target_chat_id=settings.telegram_target_chat_id,
         repository=repository,
         bootstrap_session_string=settings.telegram_user_session_string,
+        upload_retry_base_delay_seconds=settings.upload_retry_base_delay_seconds,
+        upload_retry_max_delay_seconds=settings.upload_retry_max_delay_seconds,
     )
     await uploader.start()
 

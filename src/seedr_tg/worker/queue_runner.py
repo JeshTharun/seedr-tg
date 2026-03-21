@@ -90,7 +90,7 @@ class QueueRunner:
                 LOGGER.info("Job %s was canceled", job.id)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("Job %s failed", job.id)
-                await self._mark_failed(job.id, str(exc))
+                await self._mark_failed(job.id, self._format_failure_reason(exc))
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -390,6 +390,19 @@ class QueueRunner:
         self._speed_samples.pop((job_id, "download"), None)
         self._speed_samples.pop((job_id, "upload"), None)
         await self._sync_admin_message(failed)
+
+    @staticmethod
+    def _format_failure_reason(exc: Exception) -> str:
+        message = str(exc).strip()
+        if message:
+            return f"{exc.__class__.__name__}: {message}"
+        cause = exc.__cause__
+        if cause is None:
+            return exc.__class__.__name__
+        cause_message = str(cause).strip()
+        if cause_message:
+            return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__}: {cause_message})"
+        return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__})"
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
         text = format_job_status(job)
