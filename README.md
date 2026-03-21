@@ -25,6 +25,7 @@ Copy `.env.example` to `.env` and fill these values:
 - `MONGODB_URI`: MongoDB connection for jobs, auth state, and Telegram user session storage.
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
+- `WEB_API_ALLOWED_ORIGINS`: Comma-separated list of browser origins allowed to call the web API (for example your Vercel frontend URL).
 
 All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 

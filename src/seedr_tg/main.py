@@ -12,7 +12,7 @@ from seedr_tg.logging import configure_logging
 from seedr_tg.seedr.client import SeedrService
 from seedr_tg.telegram.bot_app import TelegramBotApp
 from seedr_tg.telegram.uploader import TelegramUploader
-from seedr_tg.web.api import WebApiServer
+from seedr_tg.web.api import WebApiConfig, WebApiServer
 from seedr_tg.worker.queue_runner import QueueRunner
 
 
@@ -111,6 +111,7 @@ async def run() -> None:
     web_api = WebApiServer(
         enqueue_callback=queue_runner.enqueue_magnet,
         list_jobs_callback=queue_runner.list_jobs,
+        config=WebApiConfig(allowed_origins=settings.web_api_allowed_origins),
     )
 
     stop_event = asyncio.Event()

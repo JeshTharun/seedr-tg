@@ -44,6 +44,10 @@ class QueueJobResponse(BaseModel):
 class WebApiConfig:
     host: str = "127.0.0.1"
     port: int = 8787
+    allowed_origins: tuple[str, ...] = (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
 
 
 class WebApiServer:
@@ -65,7 +69,7 @@ class WebApiServer:
         app = FastAPI(title="seedr-tg web api", version="1.0.0")
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+            allow_origins=list(self._config.allowed_origins),
             allow_credentials=False,
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
