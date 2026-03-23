@@ -31,6 +31,8 @@ Copy `.env.example` to `.env` and fill these values:
 - `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
 - `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
 
+MTProto uploader backend uses Kurigram (maintained Pyrogram fork).
+
 All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 
 ## Run (OS-specific)
@@ -227,6 +229,7 @@ Examples:
 ## Notes
 
 - Use `/session_start <phone>`, `/session_code <code>`, and optionally `/session_password <password>` in the admin chat to create the Telegram premium uploader session and store it in MongoDB.
+- After upgrading from older Telethon-based builds, recreate uploader session once using `/session_start`, `/session_code`, and `/session_password` (if needed), because old session strings are not compatible.
 - Use `/seedr_auth` and `/seedr_auth_done` in the admin chat to complete Seedr device-code authentication and store the refreshed token in MongoDB.
 - Optional high-speed downloader mode: set `USE_ARIA2_DOWNLOADS=true` and keep `aria2c` installed. If aria2 fails for any file, the app automatically falls back to the built-in HTTP downloader.
 - aria2 tuning keys: `ARIA2_SPLIT`, `ARIA2_MAX_CONNECTION_PER_SERVER`, `ARIA2_MIN_SPLIT_SIZE`, and `ARIA2_FILE_ALLOCATION`.

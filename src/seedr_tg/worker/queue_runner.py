@@ -159,7 +159,9 @@ class QueueRunner:
             path for path in file_paths if path.suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
         ]
         skipped_file_names = [
-            path.name for path in file_paths if path.suffix.lower() not in _ALLOWED_UPLOAD_EXTENSIONS
+            path.name
+            for path in file_paths
+            if path.suffix.lower() not in _ALLOWED_UPLOAD_EXTENSIONS
         ]
         if skipped_file_names:
             LOGGER.info(
@@ -226,7 +228,7 @@ class QueueRunner:
             current_step="Cleaning local files",
         )
         await self._sync_admin_message(job)
-        shutil.rmtree(local_root, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, local_root, True)
 
         job = await self._transition(
             job_id,
@@ -327,7 +329,10 @@ class QueueRunner:
                 root_files = await self._seedr_service.fetch_remote_files(None)
                 if root_files:
                     LOGGER.info(
-                        "Recovered downloadable files from Seedr root on attempt %s for folder_id=%s",
+                        (
+                            "Recovered downloadable files from Seedr root "
+                            "on attempt %s for folder_id=%s"
+                        ),
                         attempt,
                         folder_id,
                     )
@@ -355,9 +360,9 @@ class QueueRunner:
         with contextlib.suppress(Exception):
             await self._seedr_service.delete_folder(job.seedr_folder_id)
         if job.local_path:
-            shutil.rmtree(job.local_path, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, job.local_path, True)
         local_root = self._settings.download_root / f"job_{job.id}"
-        shutil.rmtree(local_root, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, local_root, True)
         canceled = await self._transition(
             job_id,
             phase=JobPhase.CANCELED,
@@ -379,7 +384,7 @@ class QueueRunner:
         with contextlib.suppress(Exception):
             await self._seedr_service.delete_folder(job.seedr_folder_id)
         if job.local_path:
-            shutil.rmtree(job.local_path, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, job.local_path, True)
         failed = await self._transition(
             job_id,
             phase=JobPhase.FAILED,
@@ -401,7 +406,10 @@ class QueueRunner:
             return exc.__class__.__name__
         cause_message = str(cause).strip()
         if cause_message:
-            return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__}: {cause_message})"
+            return (
+                f"{exc.__class__.__name__} "
+                f"(caused by {cause.__class__.__name__}: {cause_message})"
+            )
         return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__})"
 
     async def _sync_admin_message(self, job: JobRecord) -> None:

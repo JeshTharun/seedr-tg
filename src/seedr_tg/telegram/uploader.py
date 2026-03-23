@@ -11,19 +11,17 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from pyrogram import Client
+from pyrogram.errors import (
+    FloodWait,
+    PhoneCodeExpired,
+    PhoneCodeInvalid,
+    RPCError,
+    SessionPasswordNeeded,
+)
 from telegram import Bot, InputFile
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
-from telethon import TelegramClient
-from telethon.errors import (
-    FloodWaitError,
-    PhoneCodeExpiredError,
-    PhoneCodeInvalidError,
-    RPCError,
-    SessionPasswordNeededError,
-)
-from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
-from telethon.sessions import StringSession
 
 from seedr_tg.db.models import (
     CaptionParseMode,
@@ -63,15 +61,17 @@ class TelegramUploader:
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
     _BOT_READ_TIMEOUT_SECONDS = 900.0
 
-    @staticmethod
-    def _create_client(session_string: str, api_id: int, api_hash: str) -> TelegramClient:
-        # Abridged transport reduces MTProto framing overhead vs TcpFull.
-        return TelegramClient(
-            StringSession(session_string),
-            api_id,
-            api_hash,
-            connection=ConnectionTcpAbridged,
-        )
+    def _create_client(self, session_string: str | None, *, name: str) -> Client:
+        kwargs: dict[str, Any] = {
+            "name": name,
+            "api_id": self._api_id,
+            "api_hash": self._api_hash,
+            "in_memory": True,
+            "no_updates": True,
+        }
+        if session_string:
+            kwargs["session_string"] = session_string
+        return Client(**kwargs)
 
     def __init__(
         self,
@@ -121,7 +121,7 @@ class TelegramUploader:
             if upload_governor_scale_up_after_stable_files is not None
             else self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES,
         )
-        self._client: TelegramClient | None = None
+        self._client: Client | None = None
         self._bot: Bot | None = None
         self._governor_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
@@ -138,10 +138,19 @@ class TelegramUploader:
             try:
                 await self._persist_authorized_session(client, phone_number=None)
             finally:
-                await client.disconnect()
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
         stored_session = await self._repository.get_telegram_user_session()
         if stored_session is not None:
-            self._client = await self._connect_client(stored_session.session_string)
+            try:
+                self._client = await self._connect_client(stored_session.session_string)
+            except RuntimeError as exc:
+                LOGGER.warning(
+                    "Stored MTProto session is not valid for Kurigram uploader. "
+                    "Run /session_start <phone> to recreate it. details=%s",
+                    exc,
+                )
+                self._client = None
 
     async def stop(self) -> None:
         if self._client is not None:
@@ -162,49 +171,53 @@ class TelegramUploader:
             self._bot = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
-        client = self._create_client("", self._api_id, self._api_hash)
+        client = self._create_client(None, name=f"seedr_tg_login_{int(time.time())}")
         await client.connect()
         try:
-            sent = await client.send_code_request(phone_number)
+            sent = await client.send_code(phone_number)
             login_state = await self._repository.save_telegram_login_state(
                 phone_number=phone_number,
                 phone_code_hash=sent.phone_code_hash,
-                session_string=client.session.save(),
+                session_string=await client.export_session_string(),
                 password_required=False,
             )
         finally:
-            await client.disconnect()
+            with contextlib.suppress(Exception):
+                await client.disconnect()
         return login_state
 
     async def complete_login_with_code(self, code: str) -> TelegramUserSession:
         state = await self._repository.get_telegram_login_state()
         if state is None:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
-        client = self._create_client(state.session_string, self._api_id, self._api_hash)
+        client = self._create_client(
+            state.session_string,
+            name=f"seedr_tg_login_restore_{int(time.time())}",
+        )
         await client.connect()
         try:
             await client.sign_in(
-                phone=state.phone_number,
-                code=code,
+                phone_number=state.phone_number,
                 phone_code_hash=state.phone_code_hash,
+                phone_code=code,
             )
-        except SessionPasswordNeededError as exc:
+        except SessionPasswordNeeded as exc:
             await self._repository.save_telegram_login_state(
                 phone_number=state.phone_number,
                 phone_code_hash=state.phone_code_hash,
-                session_string=client.session.save(),
+                session_string=await client.export_session_string(),
                 password_required=True,
             )
             raise TelegramPasswordRequiredError(
                 "Telegram account requires 2FA password. Run /session_password <password>."
             ) from exc
-        except PhoneCodeExpiredError as exc:
+        except PhoneCodeExpired as exc:
             await self._repository.clear_telegram_login_state()
             await client.disconnect()
             raise TelegramCodeExpiredError(
                 "Login code expired. Run /session_start <phone_number> and try /session_code again."
             ) from exc
-        except PhoneCodeInvalidError as exc:
+        except PhoneCodeInvalid as exc:
             await client.disconnect()
             raise TelegramCodeInvalidError(
                 "Invalid login code. Run /session_code with the exact code Telegram sent."
@@ -220,10 +233,13 @@ class TelegramUploader:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
         if not state.password_required:
             raise RuntimeError("Current Telegram login does not require a password.")
-        client = self._create_client(state.session_string, self._api_id, self._api_hash)
+        client = self._create_client(
+            state.session_string,
+            name=f"seedr_tg_login_restore_{int(time.time())}",
+        )
         await client.connect()
         try:
-            await client.sign_in(password=password)
+            await client.check_password(password)
         except Exception:
             await client.disconnect()
             raise
@@ -301,21 +317,19 @@ class TelegramUploader:
                 display_filename=telegram_filename,
             )
             thumb_path = self._resolve_thumbnail_path(upload_settings)
-            kwargs = {
-                "entity": self._target_chat_id,
-                "file": str(file_path),
-                "upload_file_name": telegram_filename,
+            upload_payload: dict[str, Any] = {
+                "chat_id": self._target_chat_id,
+                "file_path": str(file_path),
+                "file_name": telegram_filename,
                 "caption": caption,
+                "parse_mode": parse_mode,
+                "thumb_path": str(thumb_path) if thumb_path is not None else None,
+                "force_document": bool(
+                    upload_settings and upload_settings.media_type == UploadMediaType.DOCUMENT
+                ),
                 "supports_streaming": True,
                 "progress_callback": on_progress,
-                "part_size_kb": int(upload_part_size_kb),
             }
-            if parse_mode is not None:
-                kwargs["parse_mode"] = parse_mode
-            if upload_settings and upload_settings.media_type == UploadMediaType.DOCUMENT:
-                kwargs["force_document"] = True
-            if thumb_path is not None:
-                kwargs["thumb"] = str(thumb_path)
 
             async with semaphore:
                 file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
@@ -324,7 +338,7 @@ class TelegramUploader:
                     client = await self._get_client()
                     had_flood_wait, retry_count = await self._send_file_with_retry(
                         client,
-                        kwargs,
+                        upload_payload,
                         upload_max_retries=upload_max_retries,
                     )
                 else:
@@ -379,8 +393,8 @@ class TelegramUploader:
 
     async def _send_file_with_retry(
         self,
-        client: TelegramClient,
-        kwargs: dict[str, Any],
+        client: Client,
+        upload_payload: dict[str, Any],
         *,
         upload_max_retries: int,
     ) -> tuple[bool, int]:
@@ -388,23 +402,37 @@ class TelegramUploader:
         had_flood_wait = False
         active_client = client
         for attempt in range(1, max_attempts + 1):
-            attempt_kwargs = dict(kwargs)
+            payload = dict(upload_payload)
             try:
-                part_size_kb = int(attempt_kwargs.pop("part_size_kb", 512))
-                upload_file_name = str(attempt_kwargs.pop("upload_file_name", "")).strip()
-                file_value = attempt_kwargs.get("file")
-                if isinstance(file_value, str) and upload_file_name:
-                    uploaded = await active_client.upload_file(
-                        file_value,
-                        part_size_kb=part_size_kb,
-                        file_name=upload_file_name,
+                parse_mode = self._resolve_pyrogram_parse_mode(payload.get("parse_mode"))
+                kwargs: dict[str, Any] = {
+                    "chat_id": payload["chat_id"],
+                    "caption": payload["caption"],
+                    "parse_mode": parse_mode,
+                    "file_name": payload["file_name"],
+                    "progress": payload["progress_callback"],
+                }
+                thumb_path = payload.get("thumb_path")
+                if thumb_path:
+                    kwargs["thumb"] = thumb_path
+                if payload.get("force_document"):
+                    await active_client.send_document(
+                        document=payload["file_path"],
+                        **kwargs,
                     )
-                    attempt_kwargs["file"] = uploaded
-                await active_client.send_file(**attempt_kwargs)
+                else:
+                    await active_client.send_video(
+                        video=payload["file_path"],
+                        supports_streaming=bool(payload.get("supports_streaming", True)),
+                        **kwargs,
+                    )
                 return had_flood_wait, attempt - 1
-            except FloodWaitError as exc:
+            except FloodWait as exc:
                 had_flood_wait = True
-                wait_seconds = max(1, int(exc.seconds))
+                wait_seconds = max(
+                    1,
+                    int(getattr(exc, "value", getattr(exc, "x", getattr(exc, "seconds", 1)))),
+                )
                 LOGGER.warning("Telegram flood wait while uploading; sleeping %ss", wait_seconds)
                 await asyncio.sleep(wait_seconds)
                 if attempt >= max_attempts:
@@ -413,7 +441,7 @@ class TelegramUploader:
                 if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
                     raise
                 if isinstance(exc, OSError | TimeoutError):
-                    active_client = await self._reset_telethon_client_for_retry(active_client, exc)
+                    active_client = await self._reset_mtproto_client_for_retry(active_client, exc)
                 backoff = min(
                     self._upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
                     self._upload_retry_max_delay_seconds,
@@ -570,18 +598,18 @@ class TelegramUploader:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(old_bot.close(), timeout=10.0)
 
-    async def _reset_telethon_client_for_retry(
+    async def _reset_mtproto_client_for_retry(
         self,
-        client: TelegramClient,
+        client: Client,
         exc: BaseException,
-    ) -> TelegramClient:
-        LOGGER.warning("Resetting Telethon client after upload network error: %s", repr(exc))
+    ) -> Client:
+        LOGGER.warning("Resetting Kurigram client after upload network error: %s", repr(exc))
         with contextlib.suppress(Exception):
             await client.disconnect()
         with contextlib.suppress(Exception):
             await client.connect()
-            if await client.is_user_authorized():
-                return client
+            await client.get_me()
+            return client
         return await self._get_client()
 
     async def _determine_effective_upload_concurrency(
@@ -650,10 +678,21 @@ class TelegramUploader:
 
     @staticmethod
     def _is_retryable_upload_error(exc: BaseException) -> bool:
-        if isinstance(exc, FloodWaitError):
+        if isinstance(exc, FloodWait):
             return True
         name = exc.__class__.__name__.lower()
         return any(token in name for token in ("timeout", "connection", "rpc", "server"))
+
+    @staticmethod
+    def _resolve_pyrogram_parse_mode(parse_mode: str | None) -> str | None:
+        if parse_mode is None:
+            return None
+        normalized = parse_mode.strip().lower()
+        if normalized == "html":
+            return "html"
+        if normalized in {"md", "markdown", "markdownv2", "markdown_v2"}:
+            return "markdown"
+        return None
 
     @staticmethod
     def _resolve_bot_parse_mode(parse_mode: str | None) -> str | None:
@@ -756,8 +795,8 @@ class TelegramUploader:
                 truncated = truncated[:-1]
         return ""
 
-    async def _get_client(self) -> TelegramClient:
-        if self._client is not None and self._client.is_connected():
+    async def _get_client(self) -> Client:
+        if self._client is not None and self._is_client_connected(self._client):
             return self._client
         stored_session = await self._repository.get_telegram_user_session()
         if stored_session is None:
@@ -768,17 +807,19 @@ class TelegramUploader:
         self._client = await self._connect_client(stored_session.session_string)
         return self._client
 
-    async def _connect_client(self, session_string: str) -> TelegramClient:
-        client = self._create_client(session_string, self._api_id, self._api_hash)
+    async def _connect_client(self, session_string: str) -> Client:
+        client = self._create_client(session_string, name="seedr_tg_uploader")
         await client.connect()
-        if not await client.is_user_authorized():
+        try:
+            await client.get_me()
+        except Exception as exc:
             await client.disconnect()
-            raise RuntimeError("Stored Telegram user session is no longer authorized.")
+            raise RuntimeError("Stored Telegram user session is no longer authorized.") from exc
         return client
 
     async def _promote_client_session(
         self,
-        client: TelegramClient,
+        client: Client,
         phone_number: str | None,
     ) -> TelegramUserSession:
         session = await self._persist_authorized_session(client, phone_number=phone_number)
@@ -790,12 +831,12 @@ class TelegramUploader:
 
     async def _persist_authorized_session(
         self,
-        client: TelegramClient,
+        client: Client,
         *,
         phone_number: str | None,
     ) -> TelegramUserSession:
         me = await client.get_me()
-        session_string = client.session.save()
+        session_string = await client.export_session_string()
         display_name = None
         if me is not None:
             parts = [getattr(me, "first_name", None), getattr(me, "last_name", None)]
@@ -807,3 +848,10 @@ class TelegramUploader:
             username=getattr(me, "username", None),
             display_name=display_name,
         )
+
+    @staticmethod
+    def _is_client_connected(client: Client) -> bool:
+        connected = getattr(client, "is_connected", None)
+        if callable(connected):
+            return bool(connected())
+        return bool(connected)
