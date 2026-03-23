@@ -355,14 +355,8 @@ class QueueRunner:
             raise asyncio.CancelledError(f"Job {job_id} canceled")
 
         self._cancel_processed_jobs.add(job_id)
-        with contextlib.suppress(Exception):
-            await self._seedr_service.delete_torrent(job.seedr_torrent_id)
-        with contextlib.suppress(Exception):
-            await self._seedr_service.delete_folder(job.seedr_folder_id)
-        if job.local_path:
-            await asyncio.to_thread(shutil.rmtree, job.local_path, True)
-        local_root = self._settings.download_root / f"job_{job.id}"
-        await asyncio.to_thread(shutil.rmtree, local_root, True)
+        await self._cleanup_seedr_artifacts(job)
+        await self._cleanup_local_artifacts(job)
         canceled = await self._transition(
             job_id,
             phase=JobPhase.CANCELED,
@@ -379,12 +373,8 @@ class QueueRunner:
             job = await self._repository.get_job(job_id)
         except LookupError:
             return
-        with contextlib.suppress(Exception):
-            await self._seedr_service.delete_torrent(job.seedr_torrent_id)
-        with contextlib.suppress(Exception):
-            await self._seedr_service.delete_folder(job.seedr_folder_id)
-        if job.local_path:
-            await asyncio.to_thread(shutil.rmtree, job.local_path, True)
+        await self._cleanup_seedr_artifacts(job)
+        await self._cleanup_local_artifacts(job)
         failed = await self._transition(
             job_id,
             phase=JobPhase.FAILED,
@@ -485,3 +475,25 @@ class QueueRunner:
                 if key[0] != job_id
             }
         return job
+
+    async def _cleanup_seedr_artifacts(self, job: JobRecord) -> None:
+        folder_id = job.seedr_folder_id
+        if folder_id is None and job.seedr_torrent_id is not None:
+            with contextlib.suppress(Exception):
+                resolved = await self._seedr_service.resolve_torrent(
+                    job.seedr_torrent_id,
+                    known_folder_id=None,
+                )
+                if resolved.folder is not None:
+                    folder_id = int(resolved.folder.id)
+
+        with contextlib.suppress(Exception):
+            await self._seedr_service.delete_folder(folder_id)
+        with contextlib.suppress(Exception):
+            await self._seedr_service.delete_torrent(job.seedr_torrent_id)
+
+    async def _cleanup_local_artifacts(self, job: JobRecord) -> None:
+        if job.local_path:
+            await asyncio.to_thread(shutil.rmtree, job.local_path, True)
+        local_root = self._settings.download_root / f"job_{job.id}"
+        await asyncio.to_thread(shutil.rmtree, local_root, True)
