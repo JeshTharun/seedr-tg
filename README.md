@@ -44,6 +44,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install -e .
 seedr-tg
 ```
 
@@ -62,6 +63,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install -e .
 seedr-tg
 ```
 
@@ -72,6 +74,7 @@ py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install -e .
 seedr-tg
 ```
 
@@ -82,7 +85,28 @@ py -3 -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install -e .
 seedr-tg
+```
+
+## Troubleshooting
+
+### `seedr-tg: command not found`
+
+This means the project package was not installed into the active virtual environment yet.
+
+Run from the repository root after activating `.venv`:
+
+```bash
+python -m pip install -e .
+which seedr-tg
+seedr-tg
+```
+
+If you still do not get the command, run with module syntax as a fallback:
+
+```bash
+python -m seedr_tg.main
 ```
 
 ## PM2 Integration (Linux)
