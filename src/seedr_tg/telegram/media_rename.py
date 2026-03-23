@@ -11,7 +11,7 @@ from pathlib import Path
 
 from telegram import Message, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
 from seedr_tg.db.repository import JobRepository
@@ -107,6 +107,7 @@ class TelegramMediaRenameHandler:
         )
         last_status_text: str | None = None
         last_status_update_at = 0.0
+        flood_cooldown_until = 0.0
         phase_started_at = time.monotonic()
         speed_samples: dict[str, tuple[float, int]] = {}
 
@@ -154,7 +155,7 @@ class TelegramMediaRenameHandler:
             progress_detail: str | None = None,
             force: bool = False,
         ) -> None:
-            nonlocal last_status_text, last_status_update_at
+            nonlocal flood_cooldown_until, last_status_text, last_status_update_at
             text = self._render_status_text(
                 original_name=descriptor.original_name,
                 mode=selected_mode,
@@ -166,7 +167,10 @@ class TelegramMediaRenameHandler:
             now = time.monotonic()
             if not force and text == last_status_text:
                 return
-            if not force and (now - last_status_update_at) < 0.9:
+            min_update_interval = 2.5 if progress_percent is not None else 1.0
+            if not force and now < flood_cooldown_until:
+                return
+            if not force and (now - last_status_update_at) < min_update_interval:
                 return
             try:
                 await status_message.edit_text(
@@ -182,6 +186,15 @@ class TelegramMediaRenameHandler:
                     last_status_update_at = now
                     return
                 raise
+            except RetryAfter as exc:
+                retry_after = max(1.0, float(exc.retry_after))
+                flood_cooldown_until = now + retry_after
+                last_status_update_at = now
+                LOGGER.warning(
+                    "Rename status update rate-limited; cooling down %.2fs",
+                    retry_after,
+                )
+                return
 
         try:
             LOGGER.info(
