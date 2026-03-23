@@ -253,7 +253,11 @@ class TelegramBotApp:
         if not context.args:
             await update.effective_message.reply_text("Usage: /session_start <phone_number>")
             return
-        state = await self._start_user_session_callback(context.args[0])
+        try:
+            state = await self._start_user_session_callback(context.args[0])
+        except Exception as exc:  # noqa: BLE001
+            await update.effective_message.reply_text(f"Session start failed: {exc}")
+            return
         await update.effective_message.reply_text(
             text=(
                 "Login code sent.\n"

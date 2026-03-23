@@ -61,12 +61,18 @@ class TelegramUploader:
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
     _BOT_READ_TIMEOUT_SECONDS = 900.0
 
-    def _create_client(self, session_string: str | None, *, name: str) -> Client:
+    def _create_client(
+        self,
+        session_string: str | None,
+        *,
+        name: str,
+        in_memory: bool = True,
+    ) -> Client:
         kwargs: dict[str, Any] = {
             "name": name,
             "api_id": self._api_id,
             "api_hash": self._api_hash,
-            "in_memory": True,
+            "in_memory": in_memory,
             "no_updates": True,
         }
         if session_string:
@@ -178,14 +184,19 @@ class TelegramUploader:
             self._bot = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
-        client = self._create_client(None, name=f"seedr_tg_login_{int(time.time())}")
+        session_name = f"seedr_tg_login_{int(time.time())}_{random.randint(1000, 9999)}"
+        client = self._create_client(
+            None,
+            name=session_name,
+            in_memory=False,
+        )
         await client.connect()
         try:
             sent = await client.send_code(phone_number)
             login_state = await self._repository.save_telegram_login_state(
                 phone_number=phone_number,
                 phone_code_hash=sent.phone_code_hash,
-                session_string=await client.export_session_string(),
+                session_string=session_name,
                 password_required=False,
             )
         finally:
@@ -197,10 +208,7 @@ class TelegramUploader:
         state = await self._repository.get_telegram_login_state()
         if state is None:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
-        client = self._create_client(
-            state.session_string,
-            name=f"seedr_tg_login_restore_{int(time.time())}",
-        )
+        client = self._create_client(None, name=state.session_string, in_memory=False)
         await client.connect()
         try:
             await client.sign_in(
@@ -212,7 +220,7 @@ class TelegramUploader:
             await self._repository.save_telegram_login_state(
                 phone_number=state.phone_number,
                 phone_code_hash=state.phone_code_hash,
-                session_string=await client.export_session_string(),
+                session_string=state.session_string,
                 password_required=True,
             )
             raise TelegramPasswordRequiredError(
@@ -240,10 +248,7 @@ class TelegramUploader:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
         if not state.password_required:
             raise RuntimeError("Current Telegram login does not require a password.")
-        client = self._create_client(
-            state.session_string,
-            name=f"seedr_tg_login_restore_{int(time.time())}",
-        )
+        client = self._create_client(None, name=state.session_string, in_memory=False)
         await client.connect()
         try:
             await client.check_password(password)
