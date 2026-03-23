@@ -6,12 +6,13 @@ import shlex
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import Message, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from seedr_tg.db.models import JobPhase
@@ -19,12 +20,11 @@ from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
 from seedr_tg.status.outcome import RequesterIdentity, render_task_outcome_message
 from seedr_tg.status.template import (
-    collect_bot_stats,
     format_speed_bps,
     readable_size,
     readable_time,
-    render_operation_status,
 )
+from seedr_tg.status.unified import ActiveTaskSnapshot, TaskPhase
 from seedr_tg.telegram.uploader import TelegramUploader
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +57,13 @@ class TelegramMediaRenameHandler:
         allowed_chat_ids: set[int],
         bot_start_time: float,
         max_concurrent_tasks: int = 2,
+        register_active_task_callback: (
+            Callable[[ActiveTaskSnapshot], Awaitable[None]] | None
+        ) = None,
+        update_active_task_callback: (
+            Callable[[ActiveTaskSnapshot], Awaitable[None]] | None
+        ) = None,
+        unregister_active_task_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._uploader = uploader
         self._repository = repository
@@ -65,6 +72,9 @@ class TelegramMediaRenameHandler:
         self._allowed_chat_ids = set(allowed_chat_ids)
         self._bot_start_time = float(bot_start_time)
         self._task_semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
+        self._register_active_task_callback = register_active_task_callback
+        self._update_active_task_callback = update_active_task_callback
+        self._unregister_active_task_callback = unregister_active_task_callback
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -108,39 +118,10 @@ class TelegramMediaRenameHandler:
         )
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_download_path = temp_dir / "payload.part"
-        status_message = await message.reply_text(
-            self._render_status_text(
-                original_name=descriptor.original_name,
-                mode=selected_mode,
-                step="Queued",
-            ),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-        last_status_text: str | None = None
-        last_status_update_at = 0.0
-        flood_cooldown_until = 0.0
-        last_flood_log_at = 0.0
+        task_id = f"rename:{chat.id}:{message.message_id}"
+        last_progress_percent = 0.0
         status_lock = asyncio.Lock()
         speed_samples: dict[str, tuple[float, int]] = {}
-        last_stats_refresh_at = 0.0
-        cached_bot_stats = None
-
-        async def build_bot_stats():
-            nonlocal cached_bot_stats, last_stats_refresh_at
-            now = time.monotonic()
-            if cached_bot_stats is not None and (now - last_stats_refresh_at) < 2.0:
-                return cached_bot_stats
-            jobs = await self._repository.list_jobs(include_final=False)
-            cached_bot_stats = collect_bot_stats(
-                download_dir=self._download_root,
-                bot_start_time=self._bot_start_time,
-                tasks_count=len(jobs),
-                download_bps=sum(float(job.download_speed_bps or 0.0) for job in jobs),
-                upload_bps=sum(float(job.upload_speed_bps or 0.0) for job in jobs),
-            )
-            last_stats_refresh_at = now
-            return cached_bot_stats
 
         def measure_speed(channel: str, current_bytes: int) -> float:
             now = time.monotonic()
@@ -185,78 +166,36 @@ class TelegramMediaRenameHandler:
             progress_percent: float | None = None,
             progress_detail: str | None = None,
             force: bool = False,
+            phase: TaskPhase = "running",
+            speed_bps: float | None = None,
+            eta_seconds: int | None = None,
         ) -> None:
-            nonlocal flood_cooldown_until
-            nonlocal last_status_text
-            nonlocal last_status_update_at
-            nonlocal last_flood_log_at
+            del progress_detail, force
+            nonlocal last_progress_percent
             async with status_lock:
-                text = self._render_status_text(
-                    original_name=descriptor.original_name,
-                    mode=selected_mode,
-                    step=step,
-                    final_name=final_name,
-                    progress_percent=progress_percent,
-                    progress_detail=progress_detail,
-                    bot_stats=await build_bot_stats(),
+                if progress_percent is not None:
+                    last_progress_percent = progress_percent
+                title = final_name or descriptor.original_name
+                snapshot = ActiveTaskSnapshot(
+                    task_id=task_id,
+                    task_type="rename",
+                    title=f"[Rename] {title}",
+                    progress_percent=max(0.0, min(100.0, last_progress_percent)),
+                    status_text=step,
+                    speed_bps=speed_bps,
+                    eta_seconds=eta_seconds,
+                    elapsed_seconds=int(max(0.0, time.monotonic() - started_at)),
+                    phase=phase,
                 )
-                now = time.monotonic()
-                if not force and text == last_status_text:
-                    return
-                min_update_interval = 2.5 if progress_percent is not None else 1.0
-                if now < flood_cooldown_until:
-                    if not force:
-                        return
-                    if (flood_cooldown_until - now) > 5.0:
-                        return
-                if not force and (now - last_status_update_at) < min_update_interval:
-                    return
-
-                attempt = 0
-                while attempt < 3:
-                    attempt += 1
-                    try:
-                        await status_message.edit_text(
-                            text,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                        )
-                        last_status_text = text
-                        last_status_update_at = time.monotonic()
-                        return
-                    except BadRequest as exc:
-                        lowered = str(exc).lower()
-                        if "message is not modified" in lowered:
-                            last_status_text = text
-                            last_status_update_at = time.monotonic()
-                            return
-                        if "can't parse entities" in lowered:
-                            await status_message.edit_text(
-                                text,
-                                disable_web_page_preview=True,
-                            )
-                            last_status_text = text
-                            last_status_update_at = time.monotonic()
-                            return
-                        raise
-                    except RetryAfter as exc:
-                        now = time.monotonic()
-                        cooldown = max(1.0, float(exc.retry_after) * 1.08)
-                        flood_cooldown_until = now + cooldown
-                        last_status_update_at = now
-                        if (now - last_flood_log_at) >= 15.0:
-                            LOGGER.warning(
-                                "Rename status update rate-limited; cooling down %.2fs",
-                                cooldown,
-                            )
-                            last_flood_log_at = now
-                        if force and cooldown <= 5.0 and attempt < 3:
-                            await asyncio.sleep(cooldown)
-                            continue
-                        return
+                if phase == "queued":
+                    if self._register_active_task_callback is not None:
+                        await self._register_active_task_callback(snapshot)
+                elif self._update_active_task_callback is not None:
+                    await self._update_active_task_callback(snapshot)
 
         try:
             started_at = time.monotonic()
+            await update_status(step="Queued", phase="queued", progress_percent=0.0)
             if self._task_semaphore.locked():
                 await update_status(step="Waiting for free rename slot")
             async with self._task_semaphore:
@@ -286,6 +225,7 @@ class TelegramMediaRenameHandler:
                 step=f"Failed: {exc}",
                 progress_detail="See logs for traceback.",
                 force=True,
+                phase="failed",
             )
             await message.reply_text(
                 render_task_outcome_message(
@@ -302,6 +242,8 @@ class TelegramMediaRenameHandler:
                 disable_web_page_preview=True,
             )
         finally:
+            if self._unregister_active_task_callback is not None:
+                await self._unregister_active_task_callback(task_id)
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
     async def _run_rename_flow(
@@ -364,7 +306,6 @@ class TelegramMediaRenameHandler:
                     source_chat_id,
                     source_message_id,
                 )
-                phase_started_at = time.monotonic()
                 speed_samples.pop("download", None)
                 await update_status(step="Downloading media (MTProto fallback)")
 
@@ -376,20 +317,17 @@ class TelegramMediaRenameHandler:
                     if channel != "download":
                         return
                     speed_bps = measure_speed("download", current_bytes)
-                    elapsed = int(max(0.0, time.monotonic() - phase_started_at))
                     percent = 0.0
                     if total_bytes > 0:
                         percent = (float(current_bytes) / float(total_bytes)) * 100.0
+                    eta_seconds = None
+                    if total_bytes > current_bytes and speed_bps > 0:
+                        eta_seconds = int((total_bytes - current_bytes) / speed_bps)
                     await update_status(
                         step="Downloading media (MTProto fallback)",
                         progress_percent=percent,
-                        progress_detail=render_transfer_detail(
-                            phase_label="Download",
-                            current_bytes=current_bytes,
-                            total_bytes=total_bytes,
-                            speed_bps=speed_bps,
-                            elapsed_seconds=elapsed,
-                        ),
+                        speed_bps=speed_bps,
+                        eta_seconds=eta_seconds,
                     )
 
                 try:
@@ -443,7 +381,6 @@ class TelegramMediaRenameHandler:
             await asyncio.to_thread(downloaded_path.rename, final_path)
 
             upload_settings = await self._repository.get_upload_settings()
-            phase_started_at = time.monotonic()
             speed_samples.pop("upload", None)
 
             async def upload_progress_hook(
@@ -458,21 +395,15 @@ class TelegramMediaRenameHandler:
                 if total_bytes > 0:
                     percent = (float(current) / float(total_bytes)) * 100.0
                 speed_bps = measure_speed("upload", current)
-                elapsed = int(max(0.0, time.monotonic() - phase_started_at))
+                eta_seconds = None
+                if total_bytes > current and speed_bps > 0:
+                    eta_seconds = int((total_bytes - current) / speed_bps)
                 await update_status(
                     step="Uploading to Telegram",
                     final_name=final_name,
                     progress_percent=percent,
-                    progress_detail=(
-                        render_transfer_detail(
-                            phase_label="Upload",
-                            current_bytes=current,
-                            total_bytes=total_bytes,
-                            speed_bps=speed_bps,
-                            elapsed_seconds=elapsed,
-                        )
-                        + f"\nDetail: {detail}"
-                    ),
+                    speed_bps=speed_bps,
+                    eta_seconds=eta_seconds,
                 )
 
             await update_status(step="Uploading to Telegram", final_name=final_name)
@@ -498,6 +429,7 @@ class TelegramMediaRenameHandler:
                 final_name=final_name,
                 progress_percent=100.0,
                 force=True,
+                phase="completed",
             )
             await message.reply_text(
                 render_task_outcome_message(
@@ -516,30 +448,6 @@ class TelegramMediaRenameHandler:
             )
         except Exception:
             raise
-
-    def _render_status_text(
-        self,
-        *,
-        original_name: str,
-        mode: str,
-        step: str,
-        final_name: str | None = None,
-        progress_percent: float | None = None,
-        progress_detail: str | None = None,
-        bot_stats=None,
-    ) -> str:
-        return render_operation_status(
-            title=original_name,
-            fields=[
-                ("Original", original_name),
-                ("Mode", mode),
-            ],
-            step=step,
-            final_name=final_name,
-            progress_percent=progress_percent,
-            progress_detail=progress_detail,
-            bot_stats=bot_stats,
-        )
 
     @staticmethod
     def _extract_media_descriptor(message: Message) -> TelegramMediaDescriptor:

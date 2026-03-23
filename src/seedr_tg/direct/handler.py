@@ -6,12 +6,12 @@ import shlex
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
 from seedr_tg.db.models import JobPhase
@@ -31,7 +31,7 @@ from seedr_tg.direct.telegram_uploader import (
     DirectTelegramUploadError,
 )
 from seedr_tg.status.outcome import RequesterIdentity, render_task_outcome_message
-from seedr_tg.status.template import collect_bot_stats, render_operation_status
+from seedr_tg.status.unified import ActiveTaskSnapshot, TaskPhase
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ class DirectDownloadCommandHandler:
         download_root: Path,
         allowed_chat_ids: set[int],
         bot_start_time: float,
+        register_active_task_callback: Callable[[ActiveTaskSnapshot], Awaitable[None]],
+        update_active_task_callback: Callable[[ActiveTaskSnapshot], Awaitable[None]],
+        unregister_active_task_callback: Callable[[str], Awaitable[None]],
     ) -> None:
         self._downloader = downloader
         self._renamer = renamer
@@ -65,6 +68,9 @@ class DirectDownloadCommandHandler:
         self._download_root = download_root
         self._allowed_chat_ids = set(allowed_chat_ids)
         self._bot_start_time = float(bot_start_time)
+        self._register_active_task_callback = register_active_task_callback
+        self._update_active_task_callback = update_active_task_callback
+        self._unregister_active_task_callback = unregister_active_task_callback
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -89,94 +95,42 @@ class DirectDownloadCommandHandler:
         )
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_download_path = temp_dir / "payload.bin.part"
+        task_id = f"direct:{chat.id}:{message.message_id}"
+        task_title = options.rename_value or options.url
 
-        async def build_bot_stats():
-            jobs = await self._repository.list_jobs(include_final=False)
-            return collect_bot_stats(
-                download_dir=self._download_root,
-                bot_start_time=self._bot_start_time,
-                tasks_count=len(jobs),
-                download_bps=sum(float(job.download_speed_bps or 0.0) for job in jobs),
-                upload_bps=sum(float(job.upload_speed_bps or 0.0) for job in jobs),
-            )
-
-        initial_stats = await build_bot_stats()
-        status_message = await message.reply_text(
-            render_operation_status(
-                title=f"Direct Transfer: {options.url}",
-                fields=[("URL", options.url)],
-                step="Queued",
-                bot_stats=initial_stats,
-            ),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-        status_lock = asyncio.Lock()
-        flood_cooldown_until = 0.0
-        last_status_text: str | None = None
-        last_status_update_at = 0.0
-
-        async def update_status(
+        async def push_task(
             *,
+            phase: TaskPhase,
             step: str,
-            final_name: str | None = None,
-            progress_detail: str | None = None,
-            force: bool = False,
+            progress_percent: float,
+            speed_bps: float | None = None,
+            eta_seconds: int | None = None,
         ) -> None:
-            nonlocal flood_cooldown_until, last_status_text, last_status_update_at
-            async with status_lock:
-                bot_stats = await build_bot_stats()
-                text = render_operation_status(
-                    title=f"Direct Transfer: {options.url}",
-                    fields=[("URL", options.url)],
-                    step=step,
-                    final_name=final_name,
-                    progress_detail=progress_detail,
-                    bot_stats=bot_stats,
-                )
-                now = time.monotonic()
-                if not force and text == last_status_text:
-                    return
-                if not force and now < flood_cooldown_until:
-                    return
-                if not force and (now - last_status_update_at) < 1.0:
-                    return
-                try:
-                    await status_message.edit_text(
-                        text,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                    last_status_text = text
-                    last_status_update_at = now
-                except RetryAfter as exc:
-                    cooldown = max(1.0, float(exc.retry_after) * 1.08)
-                    flood_cooldown_until = now + cooldown
-                    last_status_update_at = now
-                    return
-                except BadRequest as exc:
-                    if "message is not modified" in str(exc).lower():
-                        last_status_text = text
-                        last_status_update_at = now
-                        return
-                    if "can't parse entities" in str(exc).lower():
-                        await status_message.edit_text(
-                            text,
-                            disable_web_page_preview=True,
-                        )
-                        last_status_text = text
-                        last_status_update_at = now
-                        return
-                    raise
+            snapshot = ActiveTaskSnapshot(
+                task_id=task_id,
+                task_type="direct",
+                title=f"[Direct] {task_title}",
+                progress_percent=progress_percent,
+                status_text=step,
+                speed_bps=speed_bps,
+                eta_seconds=eta_seconds,
+                elapsed_seconds=int(max(0.0, time.monotonic() - started_at)),
+                phase=phase,
+            )
+            if phase == "queued":
+                await self._register_active_task_callback(snapshot)
+            else:
+                await self._update_active_task_callback(snapshot)
 
         try:
+            await push_task(phase="queued", step="Queued", progress_percent=0.0)
             LOGGER.info(
                 "Direct transfer started chat_id=%s message_id=%s url=%s",
                 chat.id,
                 message.message_id,
                 options.url,
             )
-            await update_status(step="Downloading URL")
+            await push_task(phase="running", step="Downloading URL", progress_percent=15.0)
 
             downloaded = await self._downloader.download_to_path(
                 url=options.url,
@@ -193,11 +147,19 @@ class DirectDownloadCommandHandler:
                 request=rename_request,
                 target_directory=temp_dir,
             )
-            await update_status(step="Applying rename", final_name=final_name)
+            await push_task(
+                phase="running",
+                step="Applying rename",
+                progress_percent=35.0,
+            )
             final_path = temp_dir / final_name
             await asyncio.to_thread(temp_download_path.rename, final_path)
 
-            await update_status(step="Uploading to Telegram", final_name=final_name)
+            await push_task(
+                phase="running",
+                step="Uploading to Telegram",
+                progress_percent=70.0,
+            )
             await self._uploader.upload_file(bot=context.bot, chat_id=chat.id, file_path=final_path)
 
             elapsed = time.monotonic() - started_at
@@ -213,25 +175,10 @@ class DirectDownloadCommandHandler:
                 downloaded.size_bytes,
                 elapsed,
             )
-            size_text = (
-                f"{self._format_size(downloaded.size_bytes)} "
-                f"({downloaded.size_bytes} bytes)"
-            )
-            await status_message.edit_text(
-                render_operation_status(
-                    title=f"Direct Transfer: {downloaded.original_name}",
-                    fields=[
-                        ("URL", options.url),
-                        ("Original", downloaded.original_name),
-                        ("Size", size_text),
-                    ],
-                    step=f"Completed in {elapsed:.2f}s",
-                    final_name=final_name,
-                    progress_percent=100.0,
-                    bot_stats=await build_bot_stats(),
-                ),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+            await push_task(
+                phase="completed",
+                step=f"Completed in {elapsed:.2f}s",
+                progress_percent=100.0,
             )
             await message.reply_text(
                 render_task_outcome_message(
@@ -266,7 +213,11 @@ class DirectDownloadCommandHandler:
                 options.url,
                 exc,
             )
-            await update_status(step=f"Failed: Invalid URL ({exc})")
+            await push_task(
+                phase="failed",
+                step=f"Failed: Invalid URL ({exc})",
+                progress_percent=0.0,
+            )
             await message.reply_text(
                 render_task_outcome_message(
                     title=options.url,
@@ -295,7 +246,11 @@ class DirectDownloadCommandHandler:
             )
         except DirectTelegramUploadError as exc:
             LOGGER.exception("Direct upload failed for url=%s", options.url)
-            await update_status(step=f"Failed: Upload error ({exc})")
+            await push_task(
+                phase="failed",
+                step=f"Failed: Upload error ({exc})",
+                progress_percent=70.0,
+            )
             await message.reply_text(
                 render_task_outcome_message(
                     title=options.url,
@@ -324,7 +279,11 @@ class DirectDownloadCommandHandler:
             )
         except DirectDownloadError as exc:
             LOGGER.exception("Direct download failed for url=%s", options.url)
-            await update_status(step=f"Failed: Download error ({exc})")
+            await push_task(
+                phase="failed",
+                step=f"Failed: Download error ({exc})",
+                progress_percent=10.0,
+            )
             await message.reply_text(
                 render_task_outcome_message(
                     title=options.url,
@@ -353,7 +312,11 @@ class DirectDownloadCommandHandler:
             )
         except Exception:
             LOGGER.exception("Unexpected direct transfer error chat_id=%s", chat.id)
-            await update_status(step="Failed: Unexpected error")
+            await push_task(
+                phase="failed",
+                step="Failed: Unexpected error",
+                progress_percent=0.0,
+            )
             await message.reply_text(
                 render_task_outcome_message(
                     title=options.url,
@@ -381,6 +344,7 @@ class DirectDownloadCommandHandler:
                 disable_web_page_preview=True,
             )
         finally:
+            await self._unregister_active_task_callback(task_id)
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
     @staticmethod

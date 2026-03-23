@@ -31,6 +31,7 @@ from seedr_tg.db.models import (
     UploadSettings,
 )
 from seedr_tg.status.template import collect_bot_stats
+from seedr_tg.status.unified import ActiveTaskSnapshot
 from seedr_tg.telegram.uploader import (
     TelegramCodeExpiredError,
     TelegramCodeInvalidError,
@@ -110,6 +111,8 @@ class TelegramBotApp:
         self._queue_status_filter: StatusFilter = STATUS_FILTER_ACTIVE
         self._queue_status_page: int = 0
         self._queue_status_lock = asyncio.Lock()
+        self._active_tasks: dict[str, ActiveTaskSnapshot] = {}
+        self._active_tasks_lock = asyncio.Lock()
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
@@ -326,16 +329,18 @@ class TelegramBotApp:
         page: int,
     ) -> tuple[str, InlineKeyboardMarkup, StatusFilter, int]:
         jobs = await self._list_jobs_callback()
-        filtered_jobs = self._filter_jobs(jobs, selected_filter)
-        if not filtered_jobs and selected_filter != STATUS_FILTER_ALL:
+        async with self._active_tasks_lock:
+            active_tasks = list(self._active_tasks.values())
+        filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter)
+        if not filtered_entries and selected_filter != STATUS_FILTER_ALL:
             selected_filter = STATUS_FILTER_ALL
-            filtered_jobs = jobs
+            filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter)
 
-        total_items = len(filtered_jobs)
+        total_items = len(filtered_entries)
         page_count = max(1, (total_items + STATUS_PAGE_SIZE - 1) // STATUS_PAGE_SIZE)
         safe_page = min(max(0, page), page_count - 1)
         start = safe_page * STATUS_PAGE_SIZE
-        window = filtered_jobs[start : start + STATUS_PAGE_SIZE]
+        window = filtered_entries[start : start + STATUS_PAGE_SIZE]
 
         header = (
             "<b>Queue Status</b>\n"
@@ -352,9 +357,10 @@ class TelegramBotApp:
                 safe_page,
             )
 
-        bot_stats = self._build_bot_stats(jobs)
-        bodies = [format_job_status(job, bot_stats=bot_stats) for job in window]
+        bot_stats = self._build_bot_stats(jobs, active_tasks)
+        bodies = [self._render_status_entry(entry) for entry in window]
         payload = f"{header}\n\n" + "\n\n────────────────\n\n".join(bodies)
+        payload += "\n" + self._render_bot_stats_footer(bot_stats)
         return (
             payload,
             self._status_keyboard(selected_filter, safe_page, page_count),
@@ -461,16 +467,82 @@ class TelegramBotApp:
         return STATUS_FILTER_ACTIVE
 
     @staticmethod
-    def _filter_jobs(jobs: list[JobRecord], selected_filter: StatusFilter) -> list[JobRecord]:
+    def _filter_entries(
+        jobs: list[JobRecord],
+        tasks: list[ActiveTaskSnapshot],
+        selected_filter: StatusFilter,
+    ) -> list[JobRecord | ActiveTaskSnapshot]:
+        entries: list[JobRecord | ActiveTaskSnapshot] = [*jobs, *tasks]
         if selected_filter == STATUS_FILTER_ALL:
-            return jobs
+            return entries
         if selected_filter == STATUS_FILTER_QUEUED:
-            return [job for job in jobs if job.phase.value == "queued"]
+            queued_jobs = [job for job in jobs if job.phase.value == "queued"]
+            queued_tasks = [task for task in tasks if task.phase == "queued"]
+            return [*queued_jobs, *queued_tasks]
         if selected_filter == STATUS_FILTER_TRANSFERS:
             transfer_phases = {"downloading_seedr", "downloading_local", "uploading_telegram"}
-            return [job for job in jobs if job.phase.value in transfer_phases]
+            transfer_jobs = [job for job in jobs if job.phase.value in transfer_phases]
+            transfer_tasks = [task for task in tasks if task.phase in {"running", "queued"}]
+            return [*transfer_jobs, *transfer_tasks]
         final_phases = {"completed", "failed", "canceled"}
-        return [job for job in jobs if job.phase.value not in final_phases]
+        active_jobs = [job for job in jobs if job.phase.value not in final_phases]
+        active_tasks = [task for task in tasks if task.phase not in final_phases]
+        return [*active_jobs, *active_tasks]
+
+    @staticmethod
+    def _render_status_entry(entry: JobRecord | ActiveTaskSnapshot) -> str:
+        if isinstance(entry, JobRecord):
+            return format_job_status(entry)
+        from seedr_tg.status.template import render_active_task_status
+
+        return render_active_task_status(entry)
+
+    @staticmethod
+    def _render_bot_stats_footer(bot_stats) -> str:
+        from seedr_tg.status.template import render_bot_stats_footer
+
+        return render_bot_stats_footer(bot_stats)
+
+    def _build_bot_stats(
+        self,
+        jobs: list[JobRecord],
+        tasks: list[ActiveTaskSnapshot] | None = None,
+    ):
+        tasks = tasks or []
+        aggregate_dl = sum(float(job.download_speed_bps or 0.0) for job in jobs)
+        aggregate_ul = sum(float(job.upload_speed_bps or 0.0) for job in jobs)
+        for task in tasks:
+            speed = float(task.speed_bps or 0.0)
+            if speed <= 0:
+                continue
+            status = (task.status_text or "").lower()
+            if "upload" in status:
+                aggregate_ul += speed
+            else:
+                aggregate_dl += speed
+        return collect_bot_stats(
+            download_dir=self._status_download_dir,
+            bot_start_time=self._bot_start_time,
+            tasks_count=len(jobs) + len(tasks),
+            download_bps=aggregate_dl,
+            upload_bps=aggregate_ul,
+        )
+
+    async def register_active_task(self, task: ActiveTaskSnapshot) -> None:
+        async with self._active_tasks_lock:
+            self._active_tasks[task.task_id] = task
+        await self.upsert_queue_status_panel(force_create=True)
+
+    async def update_active_task(self, task: ActiveTaskSnapshot) -> None:
+        async with self._active_tasks_lock:
+            if task.task_id in self._active_tasks:
+                self._active_tasks[task.task_id] = task
+        await self.upsert_queue_status_panel(force_create=True)
+
+    async def unregister_active_task(self, task_id: str) -> None:
+        async with self._active_tasks_lock:
+            self._active_tasks.pop(task_id, None)
+        await self.upsert_queue_status_panel(force_create=True)
 
     @staticmethod
     def _status_keyboard(
@@ -794,17 +866,6 @@ class TelegramBotApp:
                 if attempts >= 3:
                     raise
                 await asyncio.sleep(wait_seconds)
-
-    def _build_bot_stats(self, jobs: list[JobRecord]):
-        aggregate_dl = sum(float(job.download_speed_bps or 0.0) for job in jobs)
-        aggregate_ul = sum(float(job.upload_speed_bps or 0.0) for job in jobs)
-        return collect_bot_stats(
-            download_dir=self._status_download_dir,
-            bot_start_time=self._bot_start_time,
-            tasks_count=len(jobs),
-            download_bps=aggregate_dl,
-            upload_bps=aggregate_ul,
-        )
 
     @staticmethod
     def _extract_magnet(text: str) -> str | None:

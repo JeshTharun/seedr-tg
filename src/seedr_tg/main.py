@@ -110,6 +110,17 @@ async def run() -> None:
     async def reset_upload_settings_callback():
         return await repository.reset_upload_settings()
 
+    direct_handler: DirectDownloadCommandHandler | None = None
+    media_rename_handler: TelegramMediaRenameHandler | None = None
+
+    async def direct_download_handler(update, context):
+        assert direct_handler is not None
+        await direct_handler.handle(update, context)
+
+    async def telegram_media_rename_handler(update, context):
+        assert media_rename_handler is not None
+        await media_rename_handler.handle(update, context)
+
     direct_downloader = DirectDownloader(
         connect_timeout_seconds=settings.download_connect_timeout_seconds,
         read_timeout_seconds=settings.download_read_timeout_seconds,
@@ -122,25 +133,6 @@ async def run() -> None:
     )
     direct_renamer = FilenameRenamer(max_filename_bytes=settings.direct_filename_max_bytes)
     direct_uploader = DirectTelegramUploader()
-    direct_handler = DirectDownloadCommandHandler(
-        downloader=direct_downloader,
-        renamer=direct_renamer,
-        uploader=direct_uploader,
-        repository=repository,
-        download_root=settings.download_root,
-        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
-        bot_start_time=bot_start_time,
-    )
-    media_rename_handler = TelegramMediaRenameHandler(
-        uploader=uploader,
-        repository=repository,
-        renamer=direct_renamer,
-        download_root=settings.download_root,
-        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
-        bot_start_time=bot_start_time,
-        max_concurrent_tasks=settings.rename_concurrency,
-    )
-
     bot_app = TelegramBotApp(
         token=settings.telegram_bot_token,
         source_chat_id=settings.telegram_source_chat_id,
@@ -157,10 +149,34 @@ async def run() -> None:
         get_upload_settings_callback=get_upload_settings_callback,
         update_upload_settings_callback=update_upload_settings_callback,
         reset_upload_settings_callback=reset_upload_settings_callback,
-        direct_download_handler=direct_handler.handle,
-        telegram_media_rename_handler=media_rename_handler.handle,
+        direct_download_handler=direct_download_handler,
+        telegram_media_rename_handler=telegram_media_rename_handler,
         status_download_dir=settings.download_root,
         bot_start_time=bot_start_time,
+    )
+    direct_handler = DirectDownloadCommandHandler(
+        downloader=direct_downloader,
+        renamer=direct_renamer,
+        uploader=direct_uploader,
+        repository=repository,
+        download_root=settings.download_root,
+        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        bot_start_time=bot_start_time,
+        register_active_task_callback=bot_app.register_active_task,
+        update_active_task_callback=bot_app.update_active_task,
+        unregister_active_task_callback=bot_app.unregister_active_task,
+    )
+    media_rename_handler = TelegramMediaRenameHandler(
+        uploader=uploader,
+        repository=repository,
+        renamer=direct_renamer,
+        download_root=settings.download_root,
+        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        bot_start_time=bot_start_time,
+        max_concurrent_tasks=settings.rename_concurrency,
+        register_active_task_callback=bot_app.register_active_task,
+        update_active_task_callback=bot_app.update_active_task,
+        unregister_active_task_callback=bot_app.unregister_active_task,
     )
     queue_runner = QueueRunner(
         settings=settings,

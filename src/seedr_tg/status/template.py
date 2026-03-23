@@ -8,6 +8,7 @@ from html import escape
 from pathlib import Path
 
 from seedr_tg.db.models import JobRecord
+from seedr_tg.status.unified import ActiveTaskSnapshot
 
 try:
     from psutil import cpu_percent, virtual_memory
@@ -125,6 +126,42 @@ def render_operation_status(
     return "\n".join(lines)
 
 
+def render_compact_task_status(
+    *,
+    title: str,
+    progress_percent: float,
+    status_text: str,
+    speed_bps: float | None,
+    eta_seconds: int | None,
+    elapsed_seconds: int,
+    cancel_command: str | None = None,
+) -> str:
+    eta_text = readable_time(eta_seconds) if eta_seconds is not None else "-"
+    lines = [
+        escape(title),
+        f"┃ {get_progress_bar_string(progress_percent)} {progress_percent:.2f}%",
+        f"┠ Status: {escape(status_text)} | ETA: {eta_text}",
+        (
+            f"┠ Speed: {format_speed_bps(speed_bps)} | "
+            f"Elapsed: {readable_time(elapsed_seconds)}"
+        ),
+    ]
+    lines.append(f"┖ {escape(cancel_command)}" if cancel_command else "┖")
+    return "\n".join(lines)
+
+
+def render_active_task_status(task: ActiveTaskSnapshot) -> str:
+    return render_compact_task_status(
+        title=task.title,
+        progress_percent=task.progress_percent,
+        status_text=task.status_text,
+        speed_bps=task.speed_bps,
+        eta_seconds=task.eta_seconds,
+        elapsed_seconds=task.elapsed_seconds,
+        cancel_command=task.cancel_command,
+    )
+
+
 def render_job_status(
     job: JobRecord,
     cfg: StatusTemplateConfig | None = None,
@@ -146,27 +183,15 @@ def render_job_status(
         eta_seconds = int(max(0.0, (total_size - processed_size) / active_speed))
 
     lines = [
-        escape(job.torrent_name or f"Job #{job.id}"),
-        f"┃ {get_progress_bar_string(job.progress_percent)} {job.progress_percent:.2f}%",
-        (
-            f"┠ Processed: {readable_size(processed_size)}"
-            f" of {readable_size(total_size)}"
-            if total_size > 0
-            else f"┠ Processed: {readable_size(processed_size)}"
-        ),
-        (
-            f"┠ Status: {escape(step)} | ETA: {readable_time(eta_seconds)}"
-            if eta_seconds is not None
-            else f"┠ Status: {escape(step)} | ETA: -"
-        ),
-        (
-            f"┠ Speed: {format_speed_bps(active_speed)} | Elapsed: "
-            f"{readable_time(elapsed_seconds)}"
-        ),
-        "┠ Engine: seedr-tg",
-        "┠ Mode: #Leech | #seedr",
-        f"┠ User: Source Chat | ID: {job.source_chat_id}",
-        f"┖ /{cancel_cmd} {job.id}",
+        render_compact_task_status(
+            title=job.torrent_name or f"Job #{job.id}",
+            progress_percent=job.progress_percent,
+            status_text=step,
+            speed_bps=active_speed,
+            eta_seconds=eta_seconds,
+            elapsed_seconds=elapsed_seconds,
+            cancel_command=f"/{cancel_cmd} {job.id}",
+        )
     ]
     if job.failure_reason:
         lines.append(f"┠ Reason: {escape(job.failure_reason)}")
@@ -254,6 +279,10 @@ def _render_bot_stats_block(snapshot: BotStatusSnapshot) -> list[str]:
             f"UL: {format_speed_bps(snapshot.upload_bps)}"
         ),
     ]
+
+
+def render_bot_stats_footer(snapshot: BotStatusSnapshot) -> str:
+    return "\n".join(_render_bot_stats_block(snapshot))
 
 
 def _elapsed_from_iso(iso_timestamp: str | None) -> int:
