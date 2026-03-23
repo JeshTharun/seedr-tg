@@ -25,6 +25,7 @@ from pyrogram.errors import (
     SessionPasswordNeeded,
 )
 from telegram import Bot, InputFile
+from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode as BotParseMode
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 
@@ -247,9 +248,20 @@ class TelegramUploader:
     def mtproto_premium_file_size_limit_bytes(self) -> int:
         return int(self._MTPROTO_PREMIUM_FILE_SIZE_LIMIT_BYTES)
 
+    def _create_bot(self) -> Bot:
+        request = HTTPXRequest(
+            connection_pool_size=8,
+            connect_timeout=self._BOT_CONNECT_TIMEOUT_SECONDS,
+            pool_timeout=self._BOT_POOL_TIMEOUT_SECONDS,
+            read_timeout=self._BOT_READ_TIMEOUT_SECONDS,
+            write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+            media_write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+        )
+        return Bot(self._bot_token, request=request)
+
     async def start(self) -> None:
         if self._bot is None:
-            self._bot = Bot(self._bot_token)
+            self._bot = self._create_bot()
         if (
             self._bootstrap_session_string
             and await self._repository.get_telegram_user_session() is None
@@ -1043,7 +1055,7 @@ class TelegramUploader:
         for attempt in range(1, max_attempts + 1):
             bot = self._bot
             if bot is None:
-                self._bot = Bot(self._bot_token)
+                self._bot = self._create_bot()
                 bot = self._bot
             if bot is None:
                 raise RuntimeError("Telegram bot client is not initialized")
@@ -1163,7 +1175,7 @@ class TelegramUploader:
 
     async def _reset_bot_client_for_retry(self, exc: BaseException) -> None:
         old_bot = self._bot
-        self._bot = Bot(self._bot_token)
+        self._bot = self._create_bot()
         if old_bot is None:
             return
         LOGGER.warning("Resetting bot client after upload network error: %s", repr(exc))
