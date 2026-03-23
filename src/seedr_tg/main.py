@@ -8,6 +8,10 @@ import signal
 from seedr_tg.config import load_settings
 from seedr_tg.db.models import CaptionParseMode, UploadMediaType
 from seedr_tg.db.repository import JobRepository
+from seedr_tg.direct.downloader import DirectDownloader
+from seedr_tg.direct.handler import DirectDownloadCommandHandler
+from seedr_tg.direct.renamer import FilenameRenamer
+from seedr_tg.direct.telegram_uploader import DirectTelegramUploader
 from seedr_tg.logging import configure_logging
 from seedr_tg.seedr.client import SeedrService
 from seedr_tg.telegram.bot_app import TelegramBotApp
@@ -89,6 +93,26 @@ async def run() -> None:
     async def reset_upload_settings_callback():
         return await repository.reset_upload_settings()
 
+    direct_downloader = DirectDownloader(
+        connect_timeout_seconds=settings.download_connect_timeout_seconds,
+        read_timeout_seconds=settings.download_read_timeout_seconds,
+        write_timeout_seconds=settings.download_write_timeout_seconds,
+        pool_timeout_seconds=settings.download_pool_timeout_seconds,
+        chunk_size_bytes=settings.direct_download_chunk_size_bytes,
+        max_retries=settings.download_max_retries,
+        retry_base_delay_seconds=settings.download_retry_base_delay_seconds,
+        retry_max_delay_seconds=settings.download_retry_max_delay_seconds,
+    )
+    direct_renamer = FilenameRenamer(max_filename_bytes=settings.direct_filename_max_bytes)
+    direct_uploader = DirectTelegramUploader()
+    direct_handler = DirectDownloadCommandHandler(
+        downloader=direct_downloader,
+        renamer=direct_renamer,
+        uploader=direct_uploader,
+        download_root=settings.download_root,
+        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+    )
+
     bot_app = TelegramBotApp(
         token=settings.telegram_bot_token,
         source_chat_id=settings.telegram_source_chat_id,
@@ -105,6 +129,7 @@ async def run() -> None:
         get_upload_settings_callback=get_upload_settings_callback,
         update_upload_settings_callback=update_upload_settings_callback,
         reset_upload_settings_callback=reset_upload_settings_callback,
+        direct_download_handler=direct_handler.handle,
     )
     queue_runner = QueueRunner(
         settings=settings,

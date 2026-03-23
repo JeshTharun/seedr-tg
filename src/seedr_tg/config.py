@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     upload_max_retries: int = 4
     upload_retry_base_delay_seconds: float = 1.0
     upload_retry_max_delay_seconds: float = 30.0
+    direct_download_chunk_size_bytes: int = 1024 * 1024
+    direct_filename_max_bytes: int = 255
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator("download_root", mode="before")

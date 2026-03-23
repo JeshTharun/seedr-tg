@@ -22,11 +22,11 @@ from telegram.ext import (
 from seedr_tg.db.models import (
     CaptionParseMode,
     JobRecord,
-    UploadMediaType,
-    UploadSettings,
     SeedrDeviceCodeRecord,
     TelegramLoginState,
     TelegramUserSession,
+    UploadMediaType,
+    UploadSettings,
 )
 from seedr_tg.telegram.uploader import (
     TelegramCodeExpiredError,
@@ -60,6 +60,7 @@ class TelegramBotApp:
         get_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
         update_upload_settings_callback: Callable[..., Awaitable[UploadSettings]],
         reset_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
+        direct_download_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
     ) -> None:
         self._source_chat_id = source_chat_id
         self._admin_chat_id = admin_chat_id
@@ -85,6 +86,7 @@ class TelegramBotApp:
         self._application.add_handler(CommandHandler("session_start", self._session_start))
         self._application.add_handler(CommandHandler("session_code", self._session_code))
         self._application.add_handler(CommandHandler("session_password", self._session_password))
+        self._application.add_handler(CommandHandler("direct", direct_download_handler))
         self._application.add_handler(CommandHandler("settings", self._settings))
         self._application.add_handler(
             CallbackQueryHandler(self._handle_settings_callback, pattern=r"^settings:")
@@ -267,7 +269,11 @@ class TelegramBotApp:
         code = normalized_code or raw_code
         try:
             session = await self._submit_user_session_code_callback(code)
-        except (TelegramPasswordRequiredError, TelegramCodeExpiredError, TelegramCodeInvalidError) as exc:
+        except (
+            TelegramPasswordRequiredError,
+            TelegramCodeExpiredError,
+            TelegramCodeInvalidError,
+        ) as exc:
             await update.effective_message.reply_text(str(exc))
             return
         except Exception as exc:  # noqa: BLE001
@@ -488,8 +494,16 @@ class TelegramBotApp:
 
     @staticmethod
     def _format_settings_text(settings: UploadSettings) -> str:
-        caption = escape(settings.caption_template) if settings.caption_template else "<i>Not set</i>"
-        thumb = escape(settings.thumbnail_local_path) if settings.thumbnail_local_path else "<i>Not set</i>"
+        caption = (
+            escape(settings.caption_template)
+            if settings.caption_template
+            else "<i>Not set</i>"
+        )
+        thumb = (
+            escape(settings.thumbnail_local_path)
+            if settings.thumbnail_local_path
+            else "<i>Not set</i>"
+        )
         return (
             "<b>Upload Settings</b>\n"
             f"<b>Media Type:</b> {escape(settings.media_type.value)}\n"

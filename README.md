@@ -12,6 +12,7 @@ Async Seedr.cc to Telegram relay service for a single channel and single Seedr a
 6. Deletes the related Seedr folder after local download completes.
 7. Uploads the files back to Telegram using a premium MTProto session.
 8. Shows progress and cancellation controls in a private admin chat.
+9. Supports direct URL relay with rename rules through `/direct`.
 
 ## Configuration
 
@@ -26,6 +27,8 @@ Copy `.env.example` to `.env` and fill these values:
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
 - `WEB_API_ALLOWED_ORIGINS`: Comma-separated list of browser origins allowed to call the web API (for example your Vercel frontend URL).
+- `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
+- `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
 
 All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 
@@ -168,6 +171,44 @@ pm2 delete seedr-tg
 - Upload extension filter is enforced: only `.mp4`, `.mkv`, and `.zip` files are uploaded; all other file types are skipped.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
+
+## Direct URL Command
+
+Use `/direct` in the source chat or admin chat to download a file from a direct URL, rename it safely, and upload it back to Telegram.
+
+Command format:
+
+```text
+/direct <url> [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]
+```
+
+Behavior summary:
+
+- URL only: keeps original filename (sanitized).
+- `--rename`: replaces filename stem with your custom value.
+- `--prefix`: prepends text before the current stem.
+- `--sub`: regex substitution on stem, case-insensitive by default.
+- `--sub-cs`: case-sensitive regex substitution.
+- Extension is always preserved.
+- If target filename already exists in temp scope, numeric suffixes like ` (1)`, ` (2)` are appended.
+- Temporary files are cleaned up on both success and failure.
+
+Examples:
+
+```text
+/direct https://example.com/video.mp4
+/direct https://example.com/video.mp4 --rename "Episode 04"
+/direct https://example.com/video.mp4 --prefix "[MyTag] "
+/direct https://example.com/video.mp4 --sub "S01E04=>S01E04 [WEB]" --sub "\\.=> "
+/direct https://example.com/video.mp4 --sub-cs "WEB=>Web"
+```
+
+Success reply includes:
+
+- original name
+- renamed name
+- file size
+- elapsed time
 
 ## Web UI (Magnet Submit)
 

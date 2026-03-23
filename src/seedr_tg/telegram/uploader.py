@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
@@ -34,6 +35,8 @@ from seedr_tg.db.models import (
 from seedr_tg.db.repository import JobRepository
 
 LOGGER = logging.getLogger(__name__)
+_TELEGRAM_FILENAME_MAX_BYTES = 255
+_INVALID_FILENAME_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 
 
 class TelegramPasswordRequiredError(RuntimeError):
@@ -254,12 +257,13 @@ class TelegramUploader:
             nonlocal completed_files
             last_emit = 0.0
             progress_emit_task: asyncio.Task[None] | None = None
+            telegram_filename = self._build_telegram_filename(file_path.name)
 
             def on_progress(
                 current: int,
                 total: int,
                 *,
-                current_name: str = file_path.name,
+                current_name: str = telegram_filename,
             ) -> None:
                 nonlocal last_emit, progress_emit_task
                 if progress_hook is None:
@@ -294,11 +298,13 @@ class TelegramUploader:
                 caption_prefix=caption_prefix,
                 job_id=job_id,
                 upload_settings=upload_settings,
+                display_filename=telegram_filename,
             )
             thumb_path = self._resolve_thumbnail_path(upload_settings)
             kwargs = {
                 "entity": self._target_chat_id,
                 "file": str(file_path),
+                "upload_file_name": telegram_filename,
                 "caption": caption,
                 "supports_streaming": True,
                 "progress_callback": on_progress,
@@ -330,6 +336,7 @@ class TelegramUploader:
                             upload_settings.media_type if upload_settings else UploadMediaType.MEDIA
                         ),
                         thumb_path=thumb_path,
+                        telegram_filename=telegram_filename,
                         upload_max_retries=upload_max_retries,
                         progress_hook=progress_hook,
                         completed_files=completed_files,
@@ -351,7 +358,7 @@ class TelegramUploader:
                 await progress_hook(
                     done,
                     total_files,
-                    f"Uploaded {file_path.name}",
+                    f"Uploaded {telegram_filename}",
                     1,
                     1,
                 )
@@ -381,8 +388,19 @@ class TelegramUploader:
         had_flood_wait = False
         active_client = client
         for attempt in range(1, max_attempts + 1):
+            attempt_kwargs = dict(kwargs)
             try:
-                await active_client.send_file(**kwargs)
+                part_size_kb = int(attempt_kwargs.pop("part_size_kb", 512))
+                upload_file_name = str(attempt_kwargs.pop("upload_file_name", "")).strip()
+                file_value = attempt_kwargs.get("file")
+                if isinstance(file_value, str) and upload_file_name:
+                    uploaded = await active_client.upload_file(
+                        file_value,
+                        part_size_kb=part_size_kb,
+                        file_name=upload_file_name,
+                    )
+                    attempt_kwargs["file"] = uploaded
+                await active_client.send_file(**attempt_kwargs)
                 return had_flood_wait, attempt - 1
             except FloodWaitError as exc:
                 had_flood_wait = True
@@ -420,6 +438,7 @@ class TelegramUploader:
         parse_mode: str | None,
         media_type: UploadMediaType,
         thumb_path: Path | None,
+        telegram_filename: str,
         upload_max_retries: int,
         progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None,
         completed_files: int,
@@ -440,7 +459,7 @@ class TelegramUploader:
                 with file_path.open("rb") as handle:
                     upload_input = InputFile(
                         handle,
-                        filename=file_path.name,
+                        filename=telegram_filename,
                         read_file_handle=False,
                     )
                     if media_type == UploadMediaType.DOCUMENT:
@@ -509,7 +528,7 @@ class TelegramUploader:
                     await progress_hook(
                         completed_files,
                         total_files,
-                        f"{file_path.name} {total_bytes}/{total_bytes}",
+                        f"{telegram_filename} {total_bytes}/{total_bytes}",
                         int(total_bytes),
                         int(total_bytes),
                     )
@@ -671,8 +690,9 @@ class TelegramUploader:
         caption_prefix: str,
         job_id: int | None,
         upload_settings: UploadSettings | None,
+        display_filename: str | None = None,
     ) -> tuple[str, str | None]:
-        filename = file_path.name
+        filename = display_filename or file_path.name
         if upload_settings is None or not upload_settings.caption_template:
             return f"{caption_prefix}\n{filename}", None
         template = upload_settings.caption_template
@@ -702,6 +722,39 @@ class TelegramUploader:
         if include_filename_prefix:
             return f"{filename}\n{rendered}", parse_mode
         return rendered, parse_mode
+
+    @staticmethod
+    def _build_telegram_filename(filename: str) -> str:
+        candidate = _INVALID_FILENAME_CHARS.sub("_", (filename or "").strip())
+        candidate = candidate.replace("\n", " ").replace("\r", " ").strip(" .")
+        if not candidate:
+            candidate = "file"
+        path = Path(candidate)
+        extension = path.suffix
+        stem = candidate[: -len(extension)] if extension else candidate
+        stem = stem.strip(" .") or "file"
+
+        base_budget = _TELEGRAM_FILENAME_MAX_BYTES - len(extension.encode("utf-8"))
+        truncated_stem = TelegramUploader._truncate_utf8(stem, max(1, base_budget))
+        final_name = f"{truncated_stem}{extension}"
+        if len(final_name.encode("utf-8")) <= _TELEGRAM_FILENAME_MAX_BYTES:
+            return final_name
+        return TelegramUploader._truncate_utf8(final_name, _TELEGRAM_FILENAME_MAX_BYTES)
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int) -> str:
+        if max_bytes <= 0:
+            return ""
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        truncated = encoded[:max_bytes]
+        while truncated:
+            try:
+                return truncated.decode("utf-8")
+            except UnicodeDecodeError:
+                truncated = truncated[:-1]
+        return ""
 
     async def _get_client(self) -> TelegramClient:
         if self._client is not None and self._client.is_connected():
