@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import shlex
 import shutil
@@ -17,6 +16,7 @@ from telegram.ext import ContextTypes
 
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
+from seedr_tg.status.template import render_operation_status
 from seedr_tg.telegram.uploader import TelegramUploader
 
 LOGGER = logging.getLogger(__name__)
@@ -288,22 +288,6 @@ class TelegramMediaRenameHandler:
         finally:
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
-    @staticmethod
-    def _format_bytes(value: int) -> str:
-        units = ["B", "KB", "MB", "GB", "TB"]
-        amount = float(max(0, int(value)))
-        index = 0
-        while amount >= 1024.0 and index < len(units) - 1:
-            amount /= 1024.0
-            index += 1
-        return f"{amount:.2f} {units[index]}"
-
-    @staticmethod
-    def _progress_bar(percent: float, width: int = 12) -> str:
-        normalized = max(0.0, min(100.0, percent))
-        filled = round((normalized / 100.0) * width)
-        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
     def _render_status_text(
         self,
         *,
@@ -314,23 +298,17 @@ class TelegramMediaRenameHandler:
         progress_percent: float | None = None,
         progress_detail: str | None = None,
     ) -> str:
-        safe_original = html.escape(original_name)
-        safe_mode = html.escape(mode)
-        safe_step = html.escape(step)
-        lines = [
-            "<b>Rename Status</b>",
-            f"<b>Original:</b> {safe_original}",
-            f"<b>Mode:</b> {safe_mode}",
-            f"<b>Step:</b> {safe_step}",
-        ]
-        if final_name:
-            lines.append(f"<b>Final:</b> {html.escape(final_name)}")
-        if progress_percent is not None:
-            bar = self._progress_bar(progress_percent)
-            lines.append(f"<b>Progress:</b> {bar} {progress_percent:.1f}%")
-        if progress_detail:
-            lines.append(f"<b>Detail:</b> {html.escape(progress_detail)}")
-        return "\n".join(lines)
+        return render_operation_status(
+            title="Rename Status",
+            fields=[
+                ("Original", original_name),
+                ("Mode", mode),
+            ],
+            step=step,
+            final_name=final_name,
+            progress_percent=progress_percent,
+            progress_detail=progress_detail,
+        )
 
     @staticmethod
     def _extract_media_descriptor(message: Message) -> TelegramMediaDescriptor:

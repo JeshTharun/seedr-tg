@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from seedr_tg.direct.downloader import (
@@ -26,6 +28,7 @@ from seedr_tg.direct.telegram_uploader import (
     DirectTelegramUploader,
     DirectTelegramUploadError,
 )
+from seedr_tg.status.template import render_operation_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +82,38 @@ class DirectDownloadCommandHandler:
         )
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_download_path = temp_dir / "payload.bin.part"
+        status_message = await message.reply_text(
+            render_operation_status(
+                title="Direct Transfer Status",
+                fields=[("URL", options.url)],
+                step="Queued",
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+        async def update_status(
+            *,
+            step: str,
+            final_name: str | None = None,
+            progress_detail: str | None = None,
+        ) -> None:
+            try:
+                await status_message.edit_text(
+                    render_operation_status(
+                        title="Direct Transfer Status",
+                        fields=[("URL", options.url)],
+                        step=step,
+                        final_name=final_name,
+                        progress_detail=progress_detail,
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    return
+                raise
 
         try:
             LOGGER.info(
@@ -87,6 +122,7 @@ class DirectDownloadCommandHandler:
                 message.message_id,
                 options.url,
             )
+            await update_status(step="Downloading URL")
 
             downloaded = await self._downloader.download_to_path(
                 url=options.url,
@@ -103,9 +139,11 @@ class DirectDownloadCommandHandler:
                 request=rename_request,
                 target_directory=temp_dir,
             )
+            await update_status(step="Applying rename", final_name=final_name)
             final_path = temp_dir / final_name
             await asyncio.to_thread(temp_download_path.rename, final_path)
 
+            await update_status(step="Uploading to Telegram", final_name=final_name)
             await self._uploader.upload_file(bot=context.bot, chat_id=chat.id, file_path=final_path)
 
             elapsed = time.monotonic() - started_at
@@ -121,13 +159,24 @@ class DirectDownloadCommandHandler:
                 downloaded.size_bytes,
                 elapsed,
             )
-            await message.reply_text(
-                "Direct upload completed successfully.\n"
-                f"Original name: {downloaded.original_name}\n"
-                f"New name: {final_name}\n"
-                f"Size: {self._format_size(downloaded.size_bytes)} "
-                f"({downloaded.size_bytes} bytes)\n"
-                f"Elapsed: {elapsed:.2f}s"
+            size_text = (
+                f"{self._format_size(downloaded.size_bytes)} "
+                f"({downloaded.size_bytes} bytes)"
+            )
+            await status_message.edit_text(
+                render_operation_status(
+                    title="Direct Transfer Status",
+                    fields=[
+                        ("URL", options.url),
+                        ("Original", downloaded.original_name),
+                        ("Size", size_text),
+                    ],
+                    step=f"Completed in {elapsed:.2f}s",
+                    final_name=final_name,
+                    progress_percent=100.0,
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except InvalidDirectUrlError as exc:
             LOGGER.warning(
@@ -135,16 +184,16 @@ class DirectDownloadCommandHandler:
                 options.url,
                 exc,
             )
-            await message.reply_text(f"Invalid URL: {exc}")
+            await update_status(step=f"Failed: Invalid URL ({exc})")
         except DirectTelegramUploadError as exc:
             LOGGER.exception("Direct upload failed for url=%s", options.url)
-            await message.reply_text(f"Upload failed: {exc}")
+            await update_status(step=f"Failed: Upload error ({exc})")
         except DirectDownloadError as exc:
             LOGGER.exception("Direct download failed for url=%s", options.url)
-            await message.reply_text(f"Download failed: {exc}")
+            await update_status(step=f"Failed: Download error ({exc})")
         except Exception:
             LOGGER.exception("Unexpected direct transfer error chat_id=%s", chat.id)
-            await message.reply_text("Direct transfer failed due to an unexpected error.")
+            await update_status(step="Failed: Unexpected error")
         finally:
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
