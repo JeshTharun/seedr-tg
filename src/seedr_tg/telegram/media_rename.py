@@ -208,6 +208,11 @@ class TelegramMediaRenameHandler:
                     last_status_text = text
                     last_status_update_at = now
                     return
+                if "can't parse entities" in str(exc).lower():
+                    await status_message.edit_text(text, disable_web_page_preview=True)
+                    last_status_text = text
+                    last_status_update_at = now
+                    return
                 raise
             except RetryAfter as exc:
                 retry_after = max(1.0, float(exc.retry_after))

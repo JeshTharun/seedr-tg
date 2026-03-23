@@ -133,6 +133,19 @@ class DirectDownloadCommandHandler:
             except BadRequest as exc:
                 if "message is not modified" in str(exc).lower():
                     return
+                if "can't parse entities" in str(exc).lower():
+                    await status_message.edit_text(
+                        render_operation_status(
+                            title=f"Direct Transfer: {options.url}",
+                            fields=[("URL", options.url)],
+                            step=step,
+                            final_name=final_name,
+                            progress_detail=progress_detail,
+                            bot_stats=bot_stats,
+                        ),
+                        disable_web_page_preview=True,
+                    )
+                    return
                 raise
 
         try:

@@ -245,7 +245,7 @@ def _render_bot_stats_block(snapshot: BotStatusSnapshot) -> list[str]:
 
     return [
         "",
-        "[<>] Bot Stats",
+        "[&lt;&gt;] Bot Stats",
         f"┠ Tasks: {snapshot.tasks_count}",
         f"┠ CPU: {cpu_text} | F: {free_text} {free_pct_text}",
         f"┠ RAM: {ram_text} | UPTIME: {readable_time(snapshot.uptime_seconds)}",
