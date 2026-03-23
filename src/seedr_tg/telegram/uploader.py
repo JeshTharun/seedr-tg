@@ -62,6 +62,7 @@ class TelegramUploader:
     _BOT_POOL_TIMEOUT_SECONDS = 30.0
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
     _BOT_READ_TIMEOUT_SECONDS = 900.0
+    _MTD_DOWNLOAD_TIMEOUT_SECONDS = 1800.0
 
     def _create_client(
         self,
@@ -328,13 +329,35 @@ class TelegramUploader:
         last_error: Exception | None = None
         for client_kind, client, effective_chat_id in clients_to_try:
             try:
-                return await self._download_media_with_client(
+                LOGGER.info(
+                    (
+                        "MTProto media download attempt started via %s client "
+                        "chat_id=%s message_id=%s"
+                    ),
+                    client_kind,
+                    effective_chat_id,
+                    message_id,
+                )
+                started_at = time.monotonic()
+                downloaded = await self._download_media_with_client(
                     client=client,
                     chat_id=effective_chat_id,
                     message_id=message_id,
                     destination=destination,
                     fallback_file_id=fallback_file_id,
                 )
+                elapsed = time.monotonic() - started_at
+                LOGGER.info(
+                    (
+                        "MTProto media download attempt completed via %s client "
+                        "chat_id=%s message_id=%s elapsed=%.2fs"
+                    ),
+                    client_kind,
+                    effective_chat_id,
+                    message_id,
+                    elapsed,
+                )
+                return downloaded
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 LOGGER.warning(
@@ -396,7 +419,10 @@ class TelegramUploader:
 
             if message is not None and has_media_fields(message):
                 try:
-                    saved_path = await client.download_media(message, file_name=str(destination))
+                    saved_path = await asyncio.wait_for(
+                        client.download_media(message, file_name=str(destination)),
+                        timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
+                    )
                 except RPCError as exc:
                     if "file_reference" in str(exc).lower() and attempt < 2:
                         LOGGER.info(
@@ -413,9 +439,12 @@ class TelegramUploader:
 
             if fallback_file_id:
                 try:
-                    saved_path = await client.download_media(
-                        fallback_file_id,
-                        file_name=str(destination),
+                    saved_path = await asyncio.wait_for(
+                        client.download_media(
+                            fallback_file_id,
+                            file_name=str(destination),
+                        ),
+                        timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
                     )
                 except RPCError as exc:
                     if "file_reference" in str(exc).lower() and attempt < 2:
