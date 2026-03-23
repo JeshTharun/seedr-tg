@@ -37,6 +37,12 @@ from seedr_tg.db.repository import JobRepository
 LOGGER = logging.getLogger(__name__)
 _TELEGRAM_FILENAME_MAX_BYTES = 255
 _INVALID_FILENAME_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
+try:
+    from pyrogram.errors import FloodPremiumWait
+
+    FLOOD_WAIT_ERRORS = (FloodWait, FloodPremiumWait)
+except Exception:  # noqa: BLE001
+    FLOOD_WAIT_ERRORS = (FloodWait,)
 
 
 class TelegramPasswordRequiredError(RuntimeError):
@@ -724,7 +730,7 @@ class TelegramUploader:
                         **kwargs,
                     )
                 return had_flood_wait, attempt - 1
-            except FloodWait as exc:
+            except FLOOD_WAIT_ERRORS as exc:
                 had_flood_wait = True
                 wait_seconds = max(
                     1,

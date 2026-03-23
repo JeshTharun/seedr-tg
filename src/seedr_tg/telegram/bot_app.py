@@ -6,6 +6,7 @@ import re
 from collections.abc import Awaitable, Callable
 from html import escape
 from pathlib import Path
+from typing import Literal
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -40,6 +41,18 @@ LOGGER = logging.getLogger(__name__)
 MAGNET_PATTERN = re.compile(r"magnet:\?[^\s]+", re.IGNORECASE)
 SETTINGS_ACTION_CAPTION = "caption"
 SETTINGS_ACTION_THUMBNAIL = "thumbnail"
+STATUS_PAGE_SIZE = 3
+STATUS_FILTER_ALL = "all"
+STATUS_FILTER_ACTIVE = "active"
+STATUS_FILTER_TRANSFERS = "transfers"
+STATUS_FILTER_QUEUED = "queued"
+StatusFilter = Literal["all", "active", "transfers", "queued"]
+VALID_STATUS_FILTERS: tuple[StatusFilter, ...] = (
+    STATUS_FILTER_ALL,
+    STATUS_FILTER_ACTIVE,
+    STATUS_FILTER_TRANSFERS,
+    STATUS_FILTER_QUEUED,
+)
 
 
 class TelegramBotApp:
@@ -88,6 +101,7 @@ class TelegramBotApp:
         self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
         self._admin_message_locks: dict[int, asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
+        self._status_locks: dict[int, asyncio.Lock] = {}
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
@@ -103,6 +117,9 @@ class TelegramBotApp:
         )
         self._application.add_handler(
             CallbackQueryHandler(self._handle_cancel, pattern=r"^cancel:\d+$")
+        )
+        self._application.add_handler(
+            CallbackQueryHandler(self._handle_status_callback, pattern=r"^status:")
         )
         self._application.add_handler(
             MessageHandler(filters.Chat(chat_id=source_chat_id) & filters.TEXT, self._on_message)
@@ -219,13 +236,204 @@ class TelegramBotApp:
         del context
         if not await self._ensure_admin(update):
             return
-        jobs = await self._list_jobs_callback()
-        if not jobs:
-            await update.effective_message.reply_text("Queue is empty.")
+        message = update.effective_message
+        if message is None:
             return
+        payload, keyboard = await self._render_status_page(
+            selected_filter=STATUS_FILTER_ACTIVE,
+            page=0,
+        )
+        await message.reply_text(
+            payload,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+
+    async def _handle_status_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = update.callback_query
+        if query is None:
+            return
+        if query.message is None or query.message.chat_id != self._admin_chat_id:
+            await query.answer("Admin only", show_alert=True)
+            return
+        data = query.data or ""
+        parts = data.split(":")
+        if len(parts) < 4:
+            await query.answer()
+            return
+
+        action = parts[1]
+        selected_filter = self._parse_status_filter(parts[2])
+        page = self._parse_status_page(parts[3])
+
+        if action == "setfilter" and len(parts) >= 5:
+            selected_filter = self._parse_status_filter(parts[4])
+            page = 0
+        elif action == "prev":
+            page = max(0, page - 1)
+        elif action == "next":
+            page = page + 1
+
+        if action == "refresh":
+            await query.answer("Refreshing...")
+        else:
+            await query.answer()
+
+        message_id = query.message.message_id
+        lock = self._status_locks.setdefault(message_id, asyncio.Lock())
+        async with lock:
+            payload, keyboard = await self._render_status_page(
+                selected_filter=selected_filter,
+                page=page,
+            )
+            try:
+                await query.edit_message_text(
+                    text=payload,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
+                )
+            except BadRequest as exc:
+                message = str(exc).lower()
+                if "message is not modified" in message:
+                    return
+                if "can't parse entities" in message:
+                    await query.edit_message_text(
+                        text=payload,
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True,
+                    )
+                    return
+                raise
+
+    async def _render_status_page(
+        self,
+        *,
+        selected_filter: StatusFilter,
+        page: int,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        jobs = await self._list_jobs_callback()
+        filtered_jobs = self._filter_jobs(jobs, selected_filter)
+        if not filtered_jobs and selected_filter != STATUS_FILTER_ALL:
+            selected_filter = STATUS_FILTER_ALL
+            filtered_jobs = jobs
+
+        total_items = len(filtered_jobs)
+        page_count = max(1, (total_items + STATUS_PAGE_SIZE - 1) // STATUS_PAGE_SIZE)
+        safe_page = min(max(0, page), page_count - 1)
+        start = safe_page * STATUS_PAGE_SIZE
+        window = filtered_jobs[start : start + STATUS_PAGE_SIZE]
+
+        header = (
+            "<b>Queue Status</b>\n"
+            f"Filter: <b>{escape(selected_filter.title())}</b> | "
+            f"Page: <b>{safe_page + 1}/{page_count}</b> | "
+            f"Items: <b>{total_items}</b>"
+        )
+        if not window:
+            payload = f"{header}\n\nNo jobs in this filter."
+            return payload, self._status_keyboard(selected_filter, safe_page, page_count)
+
         bot_stats = self._build_bot_stats(jobs)
-        payload = "\n\n".join(format_job_status(job, bot_stats=bot_stats) for job in jobs[:5])
-        await update.effective_message.reply_text(payload, parse_mode=ParseMode.HTML)
+        bodies = [format_job_status(job, bot_stats=bot_stats) for job in window]
+        payload = f"{header}\n\n" + "\n\n────────────────\n\n".join(bodies)
+        return payload, self._status_keyboard(selected_filter, safe_page, page_count)
+
+    @staticmethod
+    def _parse_status_page(raw_page: str) -> int:
+        try:
+            return max(0, int(raw_page))
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_status_filter(raw_filter: str) -> StatusFilter:
+        if raw_filter in VALID_STATUS_FILTERS:
+            return raw_filter
+        return STATUS_FILTER_ACTIVE
+
+    @staticmethod
+    def _filter_jobs(jobs: list[JobRecord], selected_filter: StatusFilter) -> list[JobRecord]:
+        if selected_filter == STATUS_FILTER_ALL:
+            return jobs
+        if selected_filter == STATUS_FILTER_QUEUED:
+            return [job for job in jobs if job.phase.value == "queued"]
+        if selected_filter == STATUS_FILTER_TRANSFERS:
+            transfer_phases = {"downloading_seedr", "downloading_local", "uploading_telegram"}
+            return [job for job in jobs if job.phase.value in transfer_phases]
+        final_phases = {"completed", "failed", "canceled"}
+        return [job for job in jobs if job.phase.value not in final_phases]
+
+    @staticmethod
+    def _status_keyboard(
+        selected_filter: StatusFilter,
+        page: int,
+        page_count: int,
+    ) -> InlineKeyboardMarkup:
+        prev_page = max(0, page - 1)
+        next_page = min(max(0, page_count - 1), page + 1)
+        has_prev = page > 0
+        has_next = page < (page_count - 1)
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Refresh",
+                        callback_data=f"status:refresh:{selected_filter}:{page}",
+                    ),
+                    InlineKeyboardButton(
+                        "Prev",
+                        callback_data=f"status:prev:{selected_filter}:{prev_page}",
+                    ),
+                    InlineKeyboardButton(
+                        "Next",
+                        callback_data=f"status:next:{selected_filter}:{next_page}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "All" if selected_filter != STATUS_FILTER_ALL else "All ✓",
+                        callback_data=f"status:setfilter:{selected_filter}:{page}:{STATUS_FILTER_ALL}",
+                    ),
+                    InlineKeyboardButton(
+                        (
+                            "Active"
+                            if selected_filter != STATUS_FILTER_ACTIVE
+                            else "Active ✓"
+                        ),
+                        callback_data=f"status:setfilter:{selected_filter}:{page}:{STATUS_FILTER_ACTIVE}",
+                    ),
+                    InlineKeyboardButton(
+                        (
+                            "Transfers"
+                            if selected_filter != STATUS_FILTER_TRANSFERS
+                            else "Transfers ✓"
+                        ),
+                        callback_data=f"status:setfilter:{selected_filter}:{page}:{STATUS_FILTER_TRANSFERS}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Queued" if selected_filter != STATUS_FILTER_QUEUED else "Queued ✓",
+                        callback_data=f"status:setfilter:{selected_filter}:{page}:{STATUS_FILTER_QUEUED}",
+                    ),
+                    InlineKeyboardButton(
+                        (
+                            f"Page {page + 1}/{max(1, page_count)}"
+                            if has_prev or has_next
+                            else "Single Page"
+                        ),
+                        callback_data=f"status:refresh:{selected_filter}:{page}",
+                    ),
+                ],
+            ]
+        )
 
     async def _seedr_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context

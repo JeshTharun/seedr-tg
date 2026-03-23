@@ -11,7 +11,7 @@ from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
 from seedr_tg.db.repository import JobRepository
@@ -109,44 +109,63 @@ class DirectDownloadCommandHandler:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+        status_lock = asyncio.Lock()
+        flood_cooldown_until = 0.0
+        last_status_text: str | None = None
+        last_status_update_at = 0.0
 
         async def update_status(
             *,
             step: str,
             final_name: str | None = None,
             progress_detail: str | None = None,
+            force: bool = False,
         ) -> None:
-            try:
+            nonlocal flood_cooldown_until, last_status_text, last_status_update_at
+            async with status_lock:
                 bot_stats = await build_bot_stats()
-                await status_message.edit_text(
-                    render_operation_status(
-                        title=f"Direct Transfer: {options.url}",
-                        fields=[("URL", options.url)],
-                        step=step,
-                        final_name=final_name,
-                        progress_detail=progress_detail,
-                        bot_stats=bot_stats,
-                    ),
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
+                text = render_operation_status(
+                    title=f"Direct Transfer: {options.url}",
+                    fields=[("URL", options.url)],
+                    step=step,
+                    final_name=final_name,
+                    progress_detail=progress_detail,
+                    bot_stats=bot_stats,
                 )
-            except BadRequest as exc:
-                if "message is not modified" in str(exc).lower():
+                now = time.monotonic()
+                if not force and text == last_status_text:
                     return
-                if "can't parse entities" in str(exc).lower():
+                if not force and now < flood_cooldown_until:
+                    return
+                if not force and (now - last_status_update_at) < 1.0:
+                    return
+                try:
                     await status_message.edit_text(
-                        render_operation_status(
-                            title=f"Direct Transfer: {options.url}",
-                            fields=[("URL", options.url)],
-                            step=step,
-                            final_name=final_name,
-                            progress_detail=progress_detail,
-                            bot_stats=bot_stats,
-                        ),
+                        text,
+                        parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
                     )
+                    last_status_text = text
+                    last_status_update_at = now
+                except RetryAfter as exc:
+                    cooldown = max(1.0, float(exc.retry_after) * 1.08)
+                    flood_cooldown_until = now + cooldown
+                    last_status_update_at = now
                     return
-                raise
+                except BadRequest as exc:
+                    if "message is not modified" in str(exc).lower():
+                        last_status_text = text
+                        last_status_update_at = now
+                        return
+                    if "can't parse entities" in str(exc).lower():
+                        await status_message.edit_text(
+                            text,
+                            disable_web_page_preview=True,
+                        )
+                        last_status_text = text
+                        last_status_update_at = now
+                        return
+                    raise
 
         try:
             LOGGER.info(

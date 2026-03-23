@@ -113,6 +113,8 @@ class TelegramMediaRenameHandler:
         last_status_text: str | None = None
         last_status_update_at = 0.0
         flood_cooldown_until = 0.0
+        last_flood_log_at = 0.0
+        status_lock = asyncio.Lock()
         speed_samples: dict[str, tuple[float, int]] = {}
         last_stats_refresh_at = 0.0
         cached_bot_stats = None
@@ -177,52 +179,74 @@ class TelegramMediaRenameHandler:
             progress_detail: str | None = None,
             force: bool = False,
         ) -> None:
-            nonlocal flood_cooldown_until, last_status_text, last_status_update_at
-            text = self._render_status_text(
-                original_name=descriptor.original_name,
-                mode=selected_mode,
-                step=step,
-                final_name=final_name,
-                progress_percent=progress_percent,
-                progress_detail=progress_detail,
-                bot_stats=await build_bot_stats(),
-            )
-            now = time.monotonic()
-            if not force and text == last_status_text:
-                return
-            min_update_interval = 2.5 if progress_percent is not None else 1.0
-            if not force and now < flood_cooldown_until:
-                return
-            if not force and (now - last_status_update_at) < min_update_interval:
-                return
-            try:
-                await status_message.edit_text(
-                    text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
+            nonlocal flood_cooldown_until
+            nonlocal last_status_text
+            nonlocal last_status_update_at
+            nonlocal last_flood_log_at
+            async with status_lock:
+                text = self._render_status_text(
+                    original_name=descriptor.original_name,
+                    mode=selected_mode,
+                    step=step,
+                    final_name=final_name,
+                    progress_percent=progress_percent,
+                    progress_detail=progress_detail,
+                    bot_stats=await build_bot_stats(),
                 )
-                last_status_text = text
-                last_status_update_at = now
-            except BadRequest as exc:
-                if "message is not modified" in str(exc).lower():
-                    last_status_text = text
-                    last_status_update_at = now
+                now = time.monotonic()
+                if not force and text == last_status_text:
                     return
-                if "can't parse entities" in str(exc).lower():
-                    await status_message.edit_text(text, disable_web_page_preview=True)
-                    last_status_text = text
-                    last_status_update_at = now
+                min_update_interval = 2.5 if progress_percent is not None else 1.0
+                if now < flood_cooldown_until:
+                    if not force:
+                        return
+                    if (flood_cooldown_until - now) > 5.0:
+                        return
+                if not force and (now - last_status_update_at) < min_update_interval:
                     return
-                raise
-            except RetryAfter as exc:
-                retry_after = max(1.0, float(exc.retry_after))
-                flood_cooldown_until = now + retry_after
-                last_status_update_at = now
-                LOGGER.warning(
-                    "Rename status update rate-limited; cooling down %.2fs",
-                    retry_after,
-                )
-                return
+
+                attempt = 0
+                while attempt < 3:
+                    attempt += 1
+                    try:
+                        await status_message.edit_text(
+                            text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                        last_status_text = text
+                        last_status_update_at = time.monotonic()
+                        return
+                    except BadRequest as exc:
+                        lowered = str(exc).lower()
+                        if "message is not modified" in lowered:
+                            last_status_text = text
+                            last_status_update_at = time.monotonic()
+                            return
+                        if "can't parse entities" in lowered:
+                            await status_message.edit_text(
+                                text,
+                                disable_web_page_preview=True,
+                            )
+                            last_status_text = text
+                            last_status_update_at = time.monotonic()
+                            return
+                        raise
+                    except RetryAfter as exc:
+                        now = time.monotonic()
+                        cooldown = max(1.0, float(exc.retry_after) * 1.08)
+                        flood_cooldown_until = now + cooldown
+                        last_status_update_at = now
+                        if (now - last_flood_log_at) >= 15.0:
+                            LOGGER.warning(
+                                "Rename status update rate-limited; cooling down %.2fs",
+                                cooldown,
+                            )
+                            last_flood_log_at = now
+                        if force and cooldown <= 5.0 and attempt < 3:
+                            await asyncio.sleep(cooldown)
+                            continue
+                        return
 
         try:
             if self._task_semaphore.locked():
