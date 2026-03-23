@@ -16,7 +16,12 @@ from telegram.ext import ContextTypes
 
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
-from seedr_tg.status.template import render_operation_status
+from seedr_tg.status.template import (
+    format_speed_bps,
+    readable_size,
+    readable_time,
+    render_operation_status,
+)
 from seedr_tg.telegram.uploader import TelegramUploader
 
 LOGGER = logging.getLogger(__name__)
@@ -33,6 +38,7 @@ class MediaRenameOptions:
 class TelegramMediaDescriptor:
     file_id: str
     original_name: str
+    size_bytes: int | None = None
 
 
 class TelegramMediaRenameHandler:
@@ -101,6 +107,44 @@ class TelegramMediaRenameHandler:
         )
         last_status_text: str | None = None
         last_status_update_at = 0.0
+        phase_started_at = time.monotonic()
+        speed_samples: dict[str, tuple[float, int]] = {}
+
+        def measure_speed(channel: str, current_bytes: int) -> float:
+            now = time.monotonic()
+            previous = speed_samples.get(channel)
+            speed_samples[channel] = (now, int(current_bytes))
+            if previous is None:
+                return 0.0
+            prev_at, prev_bytes = previous
+            delta_bytes = int(current_bytes) - int(prev_bytes)
+            delta_time = now - prev_at
+            if delta_bytes <= 0 or delta_time <= 0:
+                return 0.0
+            return float(delta_bytes) / delta_time
+
+        def render_transfer_detail(
+            *,
+            phase_label: str,
+            current_bytes: int,
+            total_bytes: int,
+            speed_bps: float,
+            elapsed_seconds: int,
+        ) -> str:
+            processed_line = (
+                f"Processed: {readable_size(current_bytes)} of {readable_size(total_bytes)}"
+                if total_bytes > 0
+                else f"Processed: {readable_size(current_bytes)}"
+            )
+            eta_seconds: int | None = None
+            if total_bytes > current_bytes and speed_bps > 0:
+                eta_seconds = int((total_bytes - current_bytes) / speed_bps)
+            eta_text = readable_time(eta_seconds) if eta_seconds is not None else "-"
+            return (
+                f"{processed_line}\n"
+                f"Status: {phase_label} | ETA: {eta_text}\n"
+                f"Speed: {format_speed_bps(speed_bps)} | Elapsed: {readable_time(elapsed_seconds)}"
+            )
 
         async def update_status(
             *,
@@ -181,7 +225,34 @@ class TelegramMediaRenameHandler:
                     source_chat_id,
                     source_message_id,
                 )
+                phase_started_at = time.monotonic()
+                speed_samples.pop("download", None)
                 await update_status(step="Downloading media (MTProto fallback)")
+
+                async def download_progress_hook(
+                    channel: str,
+                    current_bytes: int,
+                    total_bytes: int,
+                ) -> None:
+                    if channel != "download":
+                        return
+                    speed_bps = measure_speed("download", current_bytes)
+                    elapsed = int(max(0.0, time.monotonic() - phase_started_at))
+                    percent = 0.0
+                    if total_bytes > 0:
+                        percent = (float(current_bytes) / float(total_bytes)) * 100.0
+                    await update_status(
+                        step="Downloading media (MTProto fallback)",
+                        progress_percent=percent,
+                        progress_detail=render_transfer_detail(
+                            phase_label="Download",
+                            current_bytes=current_bytes,
+                            total_bytes=total_bytes,
+                            speed_bps=speed_bps,
+                            elapsed_seconds=elapsed,
+                        ),
+                    )
+
                 try:
                     downloaded_path = await self._uploader.download_telegram_message_media(
                         chat_id=source_chat_id,
@@ -189,6 +260,7 @@ class TelegramMediaRenameHandler:
                         destination=temp_download_path,
                         fallback_file_id=descriptor.file_id,
                         bot_chat_id=reply_chat_id,
+                        progress_hook=download_progress_hook,
                     )
                 except RuntimeError:
                     if (
@@ -210,6 +282,7 @@ class TelegramMediaRenameHandler:
                         destination=temp_download_path,
                         fallback_file_id=descriptor.file_id,
                         bot_chat_id=reply_chat_id,
+                        progress_hook=download_progress_hook,
                     )
 
             if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:
@@ -231,6 +304,8 @@ class TelegramMediaRenameHandler:
             await asyncio.to_thread(downloaded_path.rename, final_path)
 
             upload_settings = await self._repository.get_upload_settings()
+            phase_started_at = time.monotonic()
+            speed_samples.pop("upload", None)
 
             async def upload_progress_hook(
                 completed: int,
@@ -243,11 +318,22 @@ class TelegramMediaRenameHandler:
                 percent = 0.0
                 if total_bytes > 0:
                     percent = (float(current) / float(total_bytes)) * 100.0
+                speed_bps = measure_speed("upload", current)
+                elapsed = int(max(0.0, time.monotonic() - phase_started_at))
                 await update_status(
                     step="Uploading to Telegram",
                     final_name=final_name,
                     progress_percent=percent,
-                    progress_detail=detail,
+                    progress_detail=(
+                        render_transfer_detail(
+                            phase_label="Upload",
+                            current_bytes=current,
+                            total_bytes=total_bytes,
+                            speed_bps=speed_bps,
+                            elapsed_seconds=elapsed,
+                        )
+                        + f"\nDetail: {detail}"
+                    ),
                 )
 
             await update_status(step="Uploading to Telegram", final_name=final_name)
@@ -324,6 +410,7 @@ class TelegramMediaRenameHandler:
             return TelegramMediaDescriptor(
                 file_id=message.document.file_id,
                 original_name=original_name,
+                size_bytes=message.document.file_size,
             )
 
         if message.video is not None:
@@ -335,6 +422,7 @@ class TelegramMediaRenameHandler:
             return TelegramMediaDescriptor(
                 file_id=message.video.file_id,
                 original_name=original_name,
+                size_bytes=message.video.file_size,
             )
 
         if message.audio is not None:
@@ -346,6 +434,7 @@ class TelegramMediaRenameHandler:
             return TelegramMediaDescriptor(
                 file_id=message.audio.file_id,
                 original_name=original_name,
+                size_bytes=message.audio.file_size,
             )
 
         if message.animation is not None:
@@ -360,12 +449,14 @@ class TelegramMediaRenameHandler:
             return TelegramMediaDescriptor(
                 file_id=message.animation.file_id,
                 original_name=original_name,
+                size_bytes=message.animation.file_size,
             )
 
         if message.voice is not None:
             return TelegramMediaDescriptor(
                 file_id=message.voice.file_id,
                 original_name=f"voice_{message.message_id}.ogg",
+                size_bytes=message.voice.file_size,
             )
 
         if message.photo:
@@ -373,6 +464,7 @@ class TelegramMediaRenameHandler:
             return TelegramMediaDescriptor(
                 file_id=photo.file_id,
                 original_name=f"photo_{message.message_id}.jpg",
+                size_bytes=photo.file_size,
             )
 
         raise ValueError(

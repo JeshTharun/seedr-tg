@@ -310,6 +310,7 @@ class TelegramUploader:
         destination: Path,
         fallback_file_id: str | None = None,
         bot_chat_id: int | None = None,
+        progress_hook: Callable[[str, int, int], Awaitable[None]] | None = None,
     ) -> Path:
         """Download media from a Telegram message via MTProto (Kurigram).
 
@@ -345,6 +346,7 @@ class TelegramUploader:
                     message_id=message_id,
                     destination=destination,
                     fallback_file_id=fallback_file_id,
+                    progress_hook=progress_hook,
                 )
                 elapsed = time.monotonic() - started_at
                 LOGGER.info(
@@ -385,6 +387,7 @@ class TelegramUploader:
         message_id: int,
         destination: Path,
         fallback_file_id: str | None,
+        progress_hook: Callable[[str, int, int], Awaitable[None]] | None,
     ) -> Path:
         media_fields = (
             "document",
@@ -400,6 +403,18 @@ class TelegramUploader:
 
         def is_valid_download(path: Path) -> bool:
             return path.exists() and path.is_file() and path.stat().st_size > 0
+
+        loop = asyncio.get_running_loop()
+
+        def on_download_progress(current: int, total: int, *_: object) -> None:
+            if progress_hook is None:
+                return
+
+            def schedule_emit() -> None:
+                task = asyncio.create_task(progress_hook("download", int(current), int(total)))
+                task.add_done_callback(self._handle_progress_emit_done)
+
+            loop.call_soon_threadsafe(schedule_emit)
 
         for attempt in range(1, 3):
             if destination.exists():
@@ -420,7 +435,11 @@ class TelegramUploader:
             if message is not None and has_media_fields(message):
                 try:
                     saved_path = await asyncio.wait_for(
-                        client.download_media(message, file_name=str(destination)),
+                        client.download_media(
+                            message,
+                            file_name=str(destination),
+                            progress=on_download_progress,
+                        ),
                         timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
                     )
                 except RPCError as exc:
@@ -443,6 +462,7 @@ class TelegramUploader:
                         client.download_media(
                             fallback_file_id,
                             file_name=str(destination),
+                            progress=on_download_progress,
                         ),
                         timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
                     )
