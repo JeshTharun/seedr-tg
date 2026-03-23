@@ -148,7 +148,11 @@ class TelegramUploader:
 
     def resolve_mtproto_chat_id(self, *, bot_chat_id: int, is_private_chat: bool) -> int:
         """Resolve a Bot API chat id to a peer id usable by MTProto user sessions."""
-        if is_private_chat and self._bot_user_id is not None:
+        if self._bot_user_id is None:
+            return bot_chat_id
+        # Bot API private chats expose the human user's positive id, but MTProto
+        # user sessions need to access bot PM media via the bot peer id.
+        if is_private_chat or bot_chat_id > 0:
             return self._bot_user_id
         return bot_chat_id
 

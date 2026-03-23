@@ -109,12 +109,13 @@ class TelegramMediaRenameHandler:
                     raise
                 reply_chat = message.reply_to_message.chat
                 reply_chat_id = reply_chat.id if reply_chat is not None else chat.id
+                is_private_reply_chat = (
+                    reply_chat is not None
+                    and str(getattr(reply_chat, "type", "")).lower() == "private"
+                )
                 mtproto_chat_id = self._uploader.resolve_mtproto_chat_id(
                     bot_chat_id=reply_chat_id,
-                    is_private_chat=(
-                        reply_chat is not None
-                        and getattr(reply_chat, "type", None) == "private"
-                    ),
+                    is_private_chat=is_private_reply_chat,
                 )
                 source_chat_id, source_message_id = self._resolve_mtproto_source_message(
                     message.reply_to_message,
