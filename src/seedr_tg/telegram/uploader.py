@@ -128,6 +128,8 @@ class TelegramUploader:
             else self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES,
         )
         self._client: Client | None = None
+        self._pending_login_client: Client | None = None
+        self._pending_login_phone_number: str | None = None
         self._bot: Bot | None = None
         self._governor_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
@@ -166,6 +168,11 @@ class TelegramUploader:
                 self._client = None
 
     async def stop(self) -> None:
+        if self._pending_login_client is not None:
+            with contextlib.suppress(Exception):
+                await self._pending_login_client.disconnect()
+            self._pending_login_client = None
+            self._pending_login_phone_number = None
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await self._client.disconnect()
@@ -184,32 +191,37 @@ class TelegramUploader:
             self._bot = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
-        session_name = f"seedr_tg_login_{int(time.time())}_{random.randint(1000, 9999)}"
-        client = self._create_client(
-            None,
-            name=session_name,
-            in_memory=False,
-        )
+        if self._pending_login_client is not None:
+            with contextlib.suppress(Exception):
+                await self._pending_login_client.disconnect()
+        session_name = f"seedr_tg_login_pending_{int(time.time())}_{random.randint(1000, 9999)}"
+        client = self._create_client(None, name=session_name, in_memory=True)
         await client.connect()
         try:
             sent = await client.send_code(phone_number)
             login_state = await self._repository.save_telegram_login_state(
                 phone_number=phone_number,
                 phone_code_hash=sent.phone_code_hash,
-                session_string=session_name,
+                session_string="__pending_login_in_memory__",
                 password_required=False,
             )
-        finally:
+        except Exception:
             with contextlib.suppress(Exception):
                 await client.disconnect()
+            raise
+        self._pending_login_client = client
+        self._pending_login_phone_number = phone_number
         return login_state
 
     async def complete_login_with_code(self, code: str) -> TelegramUserSession:
         state = await self._repository.get_telegram_login_state()
         if state is None:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
-        client = self._create_client(None, name=state.session_string, in_memory=False)
-        await client.connect()
+        client = self._pending_login_client
+        if client is None or self._pending_login_phone_number != state.phone_number:
+            raise RuntimeError(
+                "Pending login session was lost. Run /session_start <phone> again."
+            )
         try:
             await client.sign_in(
                 phone_number=state.phone_number,
@@ -220,7 +232,7 @@ class TelegramUploader:
             await self._repository.save_telegram_login_state(
                 phone_number=state.phone_number,
                 phone_code_hash=state.phone_code_hash,
-                session_string=state.session_string,
+                session_string="__pending_login_in_memory__",
                 password_required=True,
             )
             raise TelegramPasswordRequiredError(
@@ -228,17 +240,18 @@ class TelegramUploader:
             ) from exc
         except PhoneCodeExpired as exc:
             await self._repository.clear_telegram_login_state()
-            await client.disconnect()
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            self._pending_login_client = None
+            self._pending_login_phone_number = None
             raise TelegramCodeExpiredError(
                 "Login code expired. Run /session_start <phone_number> and try /session_code again."
             ) from exc
         except PhoneCodeInvalid as exc:
-            await client.disconnect()
             raise TelegramCodeInvalidError(
                 "Invalid login code. Run /session_code with the exact code Telegram sent."
             ) from exc
         except Exception:
-            await client.disconnect()
             raise
         return await self._promote_client_session(client, state.phone_number)
 
@@ -248,12 +261,14 @@ class TelegramUploader:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
         if not state.password_required:
             raise RuntimeError("Current Telegram login does not require a password.")
-        client = self._create_client(None, name=state.session_string, in_memory=False)
-        await client.connect()
+        client = self._pending_login_client
+        if client is None or self._pending_login_phone_number != state.phone_number:
+            raise RuntimeError(
+                "Pending login session was lost. Run /session_start <phone> again."
+            )
         try:
             await client.check_password(password)
         except Exception:
-            await client.disconnect()
             raise
         return await self._promote_client_session(client, state.phone_number)
 
@@ -836,6 +851,8 @@ class TelegramUploader:
     ) -> TelegramUserSession:
         session = await self._persist_authorized_session(client, phone_number=phone_number)
         await self._repository.clear_telegram_login_state()
+        self._pending_login_client = None
+        self._pending_login_phone_number = None
         if self._client is not None:
             await self._client.disconnect()
         self._client = client
