@@ -16,11 +16,9 @@ from seedr_tg.status.outcome import (
     elapsed_seconds_from_iso,
     render_task_outcome_message,
 )
-from seedr_tg.status.template import collect_bot_stats
 from seedr_tg.telegram.bot_app import TelegramBotApp
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.worker.downloads import LocalDownloader
-from seedr_tg.worker.progress import format_job_status
 
 LOGGER = logging.getLogger(__name__)
 _ALLOWED_UPLOAD_EXTENSIONS = {".mp4", ".mkv", ".zip"}
@@ -490,39 +488,8 @@ class QueueRunner:
         return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__})"
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
-        active_jobs = await self._repository.list_jobs(include_final=False)
-        aggregate_dl = sum(float(item.download_speed_bps or 0.0) for item in active_jobs)
-        aggregate_ul = sum(float(item.upload_speed_bps or 0.0) for item in active_jobs)
-        bot_stats = collect_bot_stats(
-            download_dir=self._settings.download_root,
-            bot_start_time=self._bot_start_time,
-            tasks_count=len(active_jobs),
-            download_bps=aggregate_dl,
-            upload_bps=aggregate_ul,
-        )
-        text = format_job_status(job, bot_stats=bot_stats)
-        if job.admin_message_id is None:
-            # Avoid duplicate status messages when bot message creation and worker updates race.
-            latest = await self._repository.get_job(job.id)
-            if latest.admin_message_id is None:
-                await asyncio.sleep(0.25)
-                latest = await self._repository.get_job(job.id)
-            if latest.admin_message_id is not None:
-                await self._bot_app.update_admin_message(
-                    latest.admin_message_id,
-                    text,
-                    None if job.phase in FINAL_PHASES else job.id,
-                )
-                return
-            post_job_id = job.id if job.phase not in FINAL_PHASES else None
-            message_id = await self._bot_app.post_admin_message(text, post_job_id)
-            await self._repository.update_job(job.id, admin_message_id=message_id)
-            return
-        await self._bot_app.update_admin_message(
-            job.admin_message_id,
-            text,
-            None if job.phase in FINAL_PHASES else job.id,
-        )
+        del job
+        await self._bot_app.upsert_queue_status_panel(force_create=True)
 
     async def _sync_admin_message_best_effort(self, job: JobRecord) -> None:
         try:

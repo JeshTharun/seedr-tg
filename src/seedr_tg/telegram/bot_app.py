@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -105,6 +106,10 @@ class TelegramBotApp:
         self._admin_message_locks: dict[int, asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
         self._status_locks: dict[int, asyncio.Lock] = {}
+        self._queue_status_message_id: int | None = None
+        self._queue_status_filter: StatusFilter = STATUS_FILTER_ACTIVE
+        self._queue_status_page: int = 0
+        self._queue_status_lock = asyncio.Lock()
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
@@ -247,19 +252,7 @@ class TelegramBotApp:
         del context
         if not await self._ensure_admin(update):
             return
-        message = update.effective_message
-        if message is None:
-            return
-        payload, keyboard = await self._render_status_page(
-            selected_filter=STATUS_FILTER_ACTIVE,
-            page=0,
-        )
-        await message.reply_text(
-            payload,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+        await self.upsert_queue_status_panel(force_create=True)
 
     async def _handle_status_callback(
         self,
@@ -299,7 +292,7 @@ class TelegramBotApp:
         message_id = query.message.message_id
         lock = self._status_locks.setdefault(message_id, asyncio.Lock())
         async with lock:
-            payload, keyboard = await self._render_status_page(
+            payload, keyboard, normalized_filter, normalized_page = await self._render_status_page(
                 selected_filter=selected_filter,
                 page=page,
             )
@@ -322,13 +315,16 @@ class TelegramBotApp:
                     )
                     return
                 raise
+            self._queue_status_message_id = message_id
+            self._queue_status_filter = normalized_filter
+            self._queue_status_page = normalized_page
 
     async def _render_status_page(
         self,
         *,
         selected_filter: StatusFilter,
         page: int,
-    ) -> tuple[str, InlineKeyboardMarkup]:
+    ) -> tuple[str, InlineKeyboardMarkup, StatusFilter, int]:
         jobs = await self._list_jobs_callback()
         filtered_jobs = self._filter_jobs(jobs, selected_filter)
         if not filtered_jobs and selected_filter != STATUS_FILTER_ALL:
@@ -349,12 +345,107 @@ class TelegramBotApp:
         )
         if not window:
             payload = f"{header}\n\nNo jobs in this filter."
-            return payload, self._status_keyboard(selected_filter, safe_page, page_count)
+            return (
+                payload,
+                self._status_keyboard(selected_filter, safe_page, page_count),
+                selected_filter,
+                safe_page,
+            )
 
         bot_stats = self._build_bot_stats(jobs)
         bodies = [format_job_status(job, bot_stats=bot_stats) for job in window]
         payload = f"{header}\n\n" + "\n\n────────────────\n\n".join(bodies)
-        return payload, self._status_keyboard(selected_filter, safe_page, page_count)
+        return (
+            payload,
+            self._status_keyboard(selected_filter, safe_page, page_count),
+            selected_filter,
+            safe_page,
+        )
+
+    async def upsert_queue_status_panel(self, *, force_create: bool = False) -> None:
+        async with self._queue_status_lock:
+            payload, keyboard, selected_filter, safe_page = await self._render_status_page(
+                selected_filter=self._queue_status_filter,
+                page=self._queue_status_page,
+            )
+            self._queue_status_filter = selected_filter
+            self._queue_status_page = safe_page
+
+            message_id = self._queue_status_message_id
+            if force_create and message_id is None:
+                posted_id = await self.post_admin_message(payload)
+                self._queue_status_message_id = posted_id
+                try:
+                    await self._application.bot.edit_message_reply_markup(
+                        chat_id=self._admin_chat_id,
+                        message_id=posted_id,
+                        reply_markup=keyboard,
+                    )
+                except Exception:  # noqa: BLE001
+                    with contextlib.suppress(Exception):
+                        await self._application.bot.edit_message_text(
+                            chat_id=self._admin_chat_id,
+                            message_id=posted_id,
+                            text=payload,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                            disable_web_page_preview=True,
+                        )
+                return
+
+            if message_id is None:
+                posted_id = await self.post_admin_message(payload)
+                self._queue_status_message_id = posted_id
+                with contextlib.suppress(Exception):
+                    await self._application.bot.edit_message_text(
+                        chat_id=self._admin_chat_id,
+                        message_id=posted_id,
+                        text=payload,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True,
+                    )
+                return
+
+            try:
+                await self._application.bot.edit_message_text(
+                    chat_id=self._admin_chat_id,
+                    message_id=message_id,
+                    text=payload,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
+                )
+            except RetryAfter as exc:
+                await asyncio.sleep(max(1.0, float(exc.retry_after)))
+                return
+            except BadRequest as exc:
+                text = str(exc).lower()
+                if "message is not modified" in text:
+                    return
+                if "message to edit not found" in text:
+                    posted_id = await self.post_admin_message(payload)
+                    self._queue_status_message_id = posted_id
+                    with contextlib.suppress(Exception):
+                        await self._application.bot.edit_message_text(
+                            chat_id=self._admin_chat_id,
+                            message_id=posted_id,
+                            text=payload,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                            disable_web_page_preview=True,
+                        )
+                    return
+                if "can't parse entities" in text:
+                    await self._application.bot.edit_message_text(
+                        chat_id=self._admin_chat_id,
+                        message_id=message_id,
+                        text=payload,
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True,
+                    )
+                    return
+                raise
 
     @staticmethod
     def _parse_status_page(raw_page: str) -> int:
