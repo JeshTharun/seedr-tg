@@ -671,11 +671,11 @@ class TelegramMediaRenameHandler:
             token = tokens[idx]
             if token == "--rename":
                 idx += 1
-                options.explicit_name = TelegramMediaRenameHandler._require_value(
-                    tokens,
-                    idx,
-                    token,
-                )
+                value, idx = TelegramMediaRenameHandler._consume_non_option_span(tokens, idx)
+                if not value:
+                    raise ValueError(f"Missing value for {token}.")
+                options.explicit_name = value
+                continue
             elif token == "--prefix":
                 idx += 1
                 options.prefix = TelegramMediaRenameHandler._require_value(tokens, idx, token)
@@ -691,7 +691,11 @@ class TelegramMediaRenameHandler:
             elif token.startswith("--"):
                 raise ValueError(f"Unknown option: {token}. {usage}")
             elif options.explicit_name is None:
-                options.explicit_name = token
+                value, idx = TelegramMediaRenameHandler._consume_non_option_span(tokens, idx)
+                if not value:
+                    raise ValueError(usage)
+                options.explicit_name = value
+                continue
             else:
                 raise ValueError(f"Unexpected token: {token}. {usage}")
             idx += 1
@@ -702,6 +706,13 @@ class TelegramMediaRenameHandler:
         if idx >= len(tokens):
             raise ValueError(f"Missing value for {option}.")
         return tokens[idx]
+
+    @staticmethod
+    def _consume_non_option_span(tokens: list[str], idx: int) -> tuple[str, int]:
+        end = idx
+        while end < len(tokens) and not tokens[end].startswith("--"):
+            end += 1
+        return " ".join(tokens[idx:end]).strip(), end
 
     @staticmethod
     def _parse_substitution_rule(raw_value: str, *, case_sensitive: bool) -> RegexSubstitutionRule:
