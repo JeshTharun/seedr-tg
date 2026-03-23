@@ -14,6 +14,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.downloader import (
     DirectDownloader,
     DirectDownloadError,
@@ -28,7 +29,7 @@ from seedr_tg.direct.telegram_uploader import (
     DirectTelegramUploader,
     DirectTelegramUploadError,
 )
-from seedr_tg.status.template import render_operation_status
+from seedr_tg.status.template import collect_bot_stats, render_operation_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,14 +51,18 @@ class DirectDownloadCommandHandler:
         downloader: DirectDownloader,
         renamer: FilenameRenamer,
         uploader: DirectTelegramUploader,
+        repository: JobRepository,
         download_root: Path,
         allowed_chat_ids: set[int],
+        bot_start_time: float,
     ) -> None:
         self._downloader = downloader
         self._renamer = renamer
         self._uploader = uploader
+        self._repository = repository
         self._download_root = download_root
         self._allowed_chat_ids = set(allowed_chat_ids)
+        self._bot_start_time = float(bot_start_time)
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -82,11 +87,24 @@ class DirectDownloadCommandHandler:
         )
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_download_path = temp_dir / "payload.bin.part"
+
+        async def build_bot_stats():
+            jobs = await self._repository.list_jobs(include_final=False)
+            return collect_bot_stats(
+                download_dir=self._download_root,
+                bot_start_time=self._bot_start_time,
+                tasks_count=len(jobs),
+                download_bps=sum(float(job.download_speed_bps or 0.0) for job in jobs),
+                upload_bps=sum(float(job.upload_speed_bps or 0.0) for job in jobs),
+            )
+
+        initial_stats = await build_bot_stats()
         status_message = await message.reply_text(
             render_operation_status(
-                title="Direct Transfer Status",
+                title=f"Direct Transfer: {options.url}",
                 fields=[("URL", options.url)],
                 step="Queued",
+                bot_stats=initial_stats,
             ),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
@@ -99,13 +117,15 @@ class DirectDownloadCommandHandler:
             progress_detail: str | None = None,
         ) -> None:
             try:
+                bot_stats = await build_bot_stats()
                 await status_message.edit_text(
                     render_operation_status(
-                        title="Direct Transfer Status",
+                        title=f"Direct Transfer: {options.url}",
                         fields=[("URL", options.url)],
                         step=step,
                         final_name=final_name,
                         progress_detail=progress_detail,
+                        bot_stats=bot_stats,
                     ),
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
@@ -165,7 +185,7 @@ class DirectDownloadCommandHandler:
             )
             await status_message.edit_text(
                 render_operation_status(
-                    title="Direct Transfer Status",
+                    title=f"Direct Transfer: {downloaded.original_name}",
                     fields=[
                         ("URL", options.url),
                         ("Original", downloaded.original_name),
@@ -174,6 +194,7 @@ class DirectDownloadCommandHandler:
                     step=f"Completed in {elapsed:.2f}s",
                     final_name=final_name,
                     progress_percent=100.0,
+                    bot_stats=await build_bot_stats(),
                 ),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,

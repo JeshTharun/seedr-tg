@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     max_seedr_file_size_bytes: int = 4 * 1024 * 1024 * 1024
     poll_interval_seconds: float = 10.0
     progress_update_interval_seconds: float = 5.0
+    queue_concurrency: int = 2
+    seedr_active_concurrency: int = 1
+    rename_concurrency: int = 2
     download_concurrency: int = 4
     upload_concurrency: int = 2
     upload_part_size_kb: int = 512

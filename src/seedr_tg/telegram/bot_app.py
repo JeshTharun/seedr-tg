@@ -28,6 +28,7 @@ from seedr_tg.db.models import (
     UploadMediaType,
     UploadSettings,
 )
+from seedr_tg.status.template import collect_bot_stats
 from seedr_tg.telegram.uploader import (
     TelegramCodeExpiredError,
     TelegramCodeInvalidError,
@@ -65,6 +66,8 @@ class TelegramBotApp:
             [Update, ContextTypes.DEFAULT_TYPE],
             Awaitable[None],
         ],
+        status_download_dir: Path,
+        bot_start_time: float,
     ) -> None:
         self._source_chat_id = source_chat_id
         self._admin_chat_id = admin_chat_id
@@ -80,6 +83,8 @@ class TelegramBotApp:
         self._get_upload_settings_callback = get_upload_settings_callback
         self._update_upload_settings_callback = update_upload_settings_callback
         self._reset_upload_settings_callback = reset_upload_settings_callback
+        self._status_download_dir = status_download_dir
+        self._bot_start_time = float(bot_start_time)
         self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
         self._admin_message_locks: dict[int, asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
@@ -218,7 +223,8 @@ class TelegramBotApp:
         if not jobs:
             await update.effective_message.reply_text("Queue is empty.")
             return
-        payload = "\n\n".join(format_job_status(job) for job in jobs[:5])
+        bot_stats = self._build_bot_stats(jobs)
+        payload = "\n\n".join(format_job_status(job, bot_stats=bot_stats) for job in jobs[:5])
         await update.effective_message.reply_text(payload, parse_mode=ParseMode.HTML)
 
     async def _seedr_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -457,12 +463,14 @@ class TelegramBotApp:
         await query.answer()
         _, raw_job_id = query.data.split(":", maxsplit=1)
         job = await self._cancel_callback(int(raw_job_id))
+        jobs = await self._list_jobs_callback()
+        bot_stats = self._build_bot_stats(jobs)
         attempts = 0
         while True:
             attempts += 1
             try:
                 await query.edit_message_text(
-                    text=format_job_status(job),
+                    text=format_job_status(job, bot_stats=bot_stats),
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
@@ -476,6 +484,17 @@ class TelegramBotApp:
                 if attempts >= 3:
                     raise
                 await asyncio.sleep(wait_seconds)
+
+    def _build_bot_stats(self, jobs: list[JobRecord]):
+        aggregate_dl = sum(float(job.download_speed_bps or 0.0) for job in jobs)
+        aggregate_ul = sum(float(job.upload_speed_bps or 0.0) for job in jobs)
+        return collect_bot_stats(
+            download_dir=self._status_download_dir,
+            bot_start_time=self._bot_start_time,
+            tasks_count=len(jobs),
+            download_bps=aggregate_dl,
+            upload_bps=aggregate_ul,
+        )
 
     @staticmethod
     def _extract_magnet(text: str) -> str | None:

@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
 from seedr_tg.status.template import (
+    collect_bot_stats,
     format_speed_bps,
     readable_size,
     readable_time,
@@ -52,12 +53,16 @@ class TelegramMediaRenameHandler:
         renamer: FilenameRenamer,
         download_root: Path,
         allowed_chat_ids: set[int],
+        bot_start_time: float,
+        max_concurrent_tasks: int = 2,
     ) -> None:
         self._uploader = uploader
         self._repository = repository
         self._renamer = renamer
         self._download_root = download_root
         self._allowed_chat_ids = set(allowed_chat_ids)
+        self._bot_start_time = float(bot_start_time)
+        self._task_semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -108,8 +113,25 @@ class TelegramMediaRenameHandler:
         last_status_text: str | None = None
         last_status_update_at = 0.0
         flood_cooldown_until = 0.0
-        phase_started_at = time.monotonic()
         speed_samples: dict[str, tuple[float, int]] = {}
+        last_stats_refresh_at = 0.0
+        cached_bot_stats = None
+
+        async def build_bot_stats():
+            nonlocal cached_bot_stats, last_stats_refresh_at
+            now = time.monotonic()
+            if cached_bot_stats is not None and (now - last_stats_refresh_at) < 2.0:
+                return cached_bot_stats
+            jobs = await self._repository.list_jobs(include_final=False)
+            cached_bot_stats = collect_bot_stats(
+                download_dir=self._download_root,
+                bot_start_time=self._bot_start_time,
+                tasks_count=len(jobs),
+                download_bps=sum(float(job.download_speed_bps or 0.0) for job in jobs),
+                upload_bps=sum(float(job.upload_speed_bps or 0.0) for job in jobs),
+            )
+            last_stats_refresh_at = now
+            return cached_bot_stats
 
         def measure_speed(channel: str, current_bytes: int) -> float:
             now = time.monotonic()
@@ -163,6 +185,7 @@ class TelegramMediaRenameHandler:
                 final_name=final_name,
                 progress_percent=progress_percent,
                 progress_detail=progress_detail,
+                bot_stats=await build_bot_stats(),
             )
             now = time.monotonic()
             if not force and text == last_status_text:
@@ -197,12 +220,60 @@ class TelegramMediaRenameHandler:
                 return
 
         try:
+            if self._task_semaphore.locked():
+                await update_status(step="Waiting for free rename slot")
+            async with self._task_semaphore:
+                await self._run_rename_flow(
+                    message=message,
+                    chat_id=chat.id,
+                    selected_mode=selected_mode,
+                    descriptor=descriptor,
+                    options=options,
+                    context=context,
+                    temp_dir=temp_dir,
+                    temp_download_path=temp_download_path,
+                    speed_samples=speed_samples,
+                    measure_speed=measure_speed,
+                    render_transfer_detail=render_transfer_detail,
+                    update_status=update_status,
+                )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception(
+                "Telegram media rename failed chat_id=%s message_id=%s",
+                chat.id,
+                message.message_id,
+            )
+            await update_status(
+                step=f"Failed: {exc}",
+                progress_detail="See logs for traceback.",
+                force=True,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+
+    async def _run_rename_flow(
+        self,
+        *,
+        message: Message,
+        chat_id: int,
+        selected_mode: str,
+        descriptor: TelegramMediaDescriptor,
+        options: MediaRenameOptions,
+        context: ContextTypes.DEFAULT_TYPE,
+        temp_dir: Path,
+        temp_download_path: Path,
+        speed_samples: dict[str, tuple[float, int]],
+        measure_speed,
+        render_transfer_detail,
+        update_status,
+    ) -> None:
+        try:
             LOGGER.info(
                 (
                     "Telegram media rename started chat_id=%s message_id=%s "
                     "original=%s mode=%s"
                 ),
-                chat.id,
+                chat_id,
                 message.message_id,
                 descriptor.original_name,
                 selected_mode,
@@ -217,7 +288,7 @@ class TelegramMediaRenameHandler:
                 if "file is too big" not in str(exc).lower():
                     raise
                 reply_chat = message.reply_to_message.chat
-                reply_chat_id = reply_chat.id if reply_chat is not None else chat.id
+                reply_chat_id = reply_chat.id if reply_chat is not None else chat_id
                 is_private_reply_chat = (
                     reply_chat is not None
                     and str(getattr(reply_chat, "type", "")).lower() == "private"
@@ -363,7 +434,7 @@ class TelegramMediaRenameHandler:
                     "Telegram media rename upload completed chat_id=%s "
                     "original=%s final=%s"
                 ),
-                chat.id,
+                chat_id,
                 descriptor.original_name,
                 final_name,
             )
@@ -373,19 +444,8 @@ class TelegramMediaRenameHandler:
                 progress_percent=100.0,
                 force=True,
             )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception(
-                "Telegram media rename failed chat_id=%s message_id=%s",
-                chat.id,
-                message.message_id,
-            )
-            await update_status(
-                step=f"Failed: {exc}",
-                progress_detail="See logs for traceback.",
-                force=True,
-            )
-        finally:
-            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+        except Exception:
+            raise
 
     def _render_status_text(
         self,
@@ -396,9 +456,10 @@ class TelegramMediaRenameHandler:
         final_name: str | None = None,
         progress_percent: float | None = None,
         progress_detail: str | None = None,
+        bot_stats=None,
     ) -> str:
         return render_operation_status(
-            title="Rename Status",
+            title=original_name,
             fields=[
                 ("Original", original_name),
                 ("Mode", mode),
@@ -407,6 +468,7 @@ class TelegramMediaRenameHandler:
             final_name=final_name,
             progress_percent=progress_percent,
             progress_detail=progress_detail,
+            bot_stats=bot_stats,
         )
 
     @staticmethod

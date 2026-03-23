@@ -8,8 +8,8 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, ReturnDocument
 
 from seedr_tg.db.models import (
-    CaptionParseMode,
     FINAL_PHASES,
+    CaptionParseMode,
     JobPhase,
     JobRecord,
     SeedrDeviceCodeRecord,
@@ -132,6 +132,22 @@ class JobRepository:
             sort=[("queue_position", ASCENDING), ("_id", ASCENDING)],
         )
         return self._to_record(row) if row else None
+
+    async def claim_next_queued_job(self) -> JobRecord | None:
+        async with self._write_lock:
+            row = await self._jobs.find_one_and_update(
+                {"phase": JobPhase.QUEUED.value},
+                {
+                    "$set": {
+                        "phase": JobPhase.VALIDATING.value,
+                        "current_step": "Queued for Seedr",
+                        "updated_at": utc_now(),
+                    }
+                },
+                sort=[("queue_position", ASCENDING), ("_id", ASCENDING)],
+                return_document=ReturnDocument.AFTER,
+            )
+            return self._to_record(row) if row else None
 
     async def update_job(self, job_id: int, **updates: Any) -> JobRecord:
         if not updates:
@@ -318,8 +334,16 @@ class JobRepository:
             else:
                 current = self._to_upload_settings(existing_row)
 
-            new_media_type = current.media_type if media_type is _UNSET else UploadMediaType(str(media_type))
-            new_caption_template = current.caption_template if caption_template is _UNSET else caption_template
+            new_media_type = (
+                current.media_type
+                if media_type is _UNSET
+                else UploadMediaType(str(media_type))
+            )
+            new_caption_template = (
+                current.caption_template
+                if caption_template is _UNSET
+                else caption_template
+            )
             new_caption_parse_mode = (
                 current.caption_parse_mode
                 if caption_parse_mode is _UNSET

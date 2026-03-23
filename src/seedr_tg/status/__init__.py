@@ -1,5 +1,7 @@
 from seedr_tg.status.template import (
+    BotStatusSnapshot,
     StatusTemplateConfig,
+    collect_bot_stats,
     format_speed_bps,
     get_progress_bar_string,
     readable_size,
@@ -9,7 +11,9 @@ from seedr_tg.status.template import (
 )
 
 __all__ = [
+    "BotStatusSnapshot",
     "StatusTemplateConfig",
+    "collect_bot_stats",
     "format_speed_bps",
     "get_progress_bar_string",
     "readable_size",

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import signal
+import time
 
 from seedr_tg.config import load_settings
 from seedr_tg.db.models import CaptionParseMode, UploadMediaType
@@ -22,6 +23,7 @@ from seedr_tg.worker.queue_runner import QueueRunner
 
 
 async def run() -> None:
+    bot_start_time = time.time()
     settings = load_settings()
     configure_logging(settings.log_level)
 
@@ -110,8 +112,10 @@ async def run() -> None:
         downloader=direct_downloader,
         renamer=direct_renamer,
         uploader=direct_uploader,
+        repository=repository,
         download_root=settings.download_root,
         allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        bot_start_time=bot_start_time,
     )
     media_rename_handler = TelegramMediaRenameHandler(
         uploader=uploader,
@@ -119,6 +123,8 @@ async def run() -> None:
         renamer=direct_renamer,
         download_root=settings.download_root,
         allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        bot_start_time=bot_start_time,
+        max_concurrent_tasks=settings.rename_concurrency,
     )
 
     bot_app = TelegramBotApp(
@@ -139,6 +145,8 @@ async def run() -> None:
         reset_upload_settings_callback=reset_upload_settings_callback,
         direct_download_handler=direct_handler.handle,
         telegram_media_rename_handler=media_rename_handler.handle,
+        status_download_dir=settings.download_root,
+        bot_start_time=bot_start_time,
     )
     queue_runner = QueueRunner(
         settings=settings,
@@ -146,6 +154,7 @@ async def run() -> None:
         bot_app=bot_app,
         seedr_service=seedr_service,
         uploader=uploader,
+        bot_start_time=bot_start_time,
     )
     web_api = WebApiServer(
         enqueue_callback=queue_runner.enqueue_magnet,
