@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import time
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
@@ -12,9 +13,16 @@ from seedr_tg.status.unified import ActiveTaskSnapshot
 
 try:
     from psutil import cpu_percent, virtual_memory
-except Exception:  # noqa: BLE001
+except ImportError:
     cpu_percent = None
     virtual_memory = None
+
+
+LOGGER = logging.getLogger(__name__)
+_metrics_state: dict[str, object] = {
+    "cpu_sample_prev": None,
+    "fallback_warning_logged": False,
+}
 
 
 @dataclass(slots=True)
@@ -222,10 +230,21 @@ def collect_bot_stats(
     cpu: float | None = None
     if callable(cpu_percent):
         cpu = float(cpu_percent())
+    else:
+        cpu = _cpu_percent_from_proc()
 
     ram: float | None = None
     if callable(virtual_memory):
         ram = float(virtual_memory().percent)
+    else:
+        ram = _ram_percent_from_proc_meminfo()
+
+    warning_logged = bool(_metrics_state.get("fallback_warning_logged"))
+    if cpu is None and ram is None and not warning_logged:
+        LOGGER.warning(
+            "System metrics unavailable: psutil not installed and /proc fallback unavailable"
+        )
+        _metrics_state["fallback_warning_logged"] = True
 
     free_bytes: int | None = None
     free_percent: float | None = None
@@ -235,7 +254,7 @@ def collect_bot_stats(
         total = int(usage.total)
         if total > 0:
             free_percent = (float(free_bytes) / float(total)) * 100.0
-    except Exception:  # noqa: BLE001
+    except OSError:
         pass
 
     uptime_seconds = 0
@@ -252,6 +271,64 @@ def collect_bot_stats(
         download_bps=float(max(0.0, download_bps)),
         upload_bps=float(max(0.0, upload_bps)),
     )
+
+
+def _cpu_percent_from_proc() -> float | None:
+    try:
+        stat_path = Path("/proc/stat")
+        if not stat_path.exists():
+            return None
+        first_line = stat_path.read_text(encoding="utf-8").splitlines()[0]
+        parts = first_line.split()
+        if len(parts) < 5 or parts[0] != "cpu":
+            return None
+        values = [int(v) for v in parts[1:]]
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        prev = _metrics_state.get("cpu_sample_prev")
+        if prev is not None and not isinstance(prev, tuple):
+            prev = None
+        _metrics_state["cpu_sample_prev"] = (total, idle)
+        if prev is None:
+            return None
+        total_delta = total - prev[0]
+        idle_delta = idle - prev[1]
+        if total_delta <= 0:
+            return None
+        busy_pct = (1.0 - (float(idle_delta) / float(total_delta))) * 100.0
+        return max(0.0, min(100.0, busy_pct))
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def _ram_percent_from_proc_meminfo() -> float | None:
+    try:
+        meminfo_path = Path("/proc/meminfo")
+        if not meminfo_path.exists():
+            return None
+        fields: dict[str, int] = {}
+        for raw in meminfo_path.read_text(encoding="utf-8").splitlines():
+            if ":" not in raw:
+                continue
+            key, value = raw.split(":", maxsplit=1)
+            number = value.strip().split()[0]
+            fields[key] = int(number)
+        mem_total_kb = fields.get("MemTotal")
+        if not mem_total_kb or mem_total_kb <= 0:
+            return None
+        mem_available_kb = fields.get("MemAvailable")
+        if mem_available_kb is not None:
+            used_pct = (1.0 - (float(mem_available_kb) / float(mem_total_kb))) * 100.0
+            return max(0.0, min(100.0, used_pct))
+        mem_free_kb = int(fields.get("MemFree", 0))
+        buffers_kb = int(fields.get("Buffers", 0))
+        cached_kb = int(fields.get("Cached", 0))
+        reclaimable_kb = int(fields.get("SReclaimable", 0))
+        available_kb = mem_free_kb + buffers_kb + cached_kb + reclaimable_kb
+        used_pct = (1.0 - (float(available_kb) / float(mem_total_kb))) * 100.0
+        return max(0.0, min(100.0, used_pct))
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _render_bot_stats_block(snapshot: BotStatusSnapshot) -> list[str]:
@@ -291,5 +368,5 @@ def _elapsed_from_iso(iso_timestamp: str | None) -> int:
     try:
         started = datetime.fromisoformat(iso_timestamp)
         return int(max(0.0, time.time() - started.timestamp()))
-    except Exception:  # noqa: BLE001
+    except (ValueError, OSError, OverflowError):
         return 0
