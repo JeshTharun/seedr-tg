@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
-from pathlib import Path
 from typing import Literal
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -1022,8 +1022,7 @@ class TelegramBotApp:
         if action == "thumb_clear":
             await self._update_upload_settings_callback(
                 thumbnail_file_id=None,
-                thumbnail_local_path=None,
-                thumbnail_bytes=None,
+                thumbnail_base64=None,
             )
             await self._refresh_settings_message(query)
             return
@@ -1055,30 +1054,22 @@ class TelegramBotApp:
         if pending == SETTINGS_ACTION_THUMBNAIL:
             image = None
             file_id = None
-            suffix = ".jpg"
             if message.photo:
                 image = message.photo[-1]
                 file_id = image.file_id
             elif message.document and (message.document.mime_type or "").startswith("image/"):
                 image = message.document
                 file_id = image.file_id
-                if image.file_name and "." in image.file_name:
-                    suffix = Path(image.file_name).suffix or suffix
             if image is None or file_id is None:
                 await message.reply_text("Send a photo or image document for thumbnail.")
                 return
             telegram_file = await image.get_file()
-            thumbnails_dir = Path("downloads") / "thumbnails"
-            thumbnails_dir.mkdir(parents=True, exist_ok=True)
-            local_path = thumbnails_dir / f"custom_thumbnail{suffix}"
-            await telegram_file.download_to_drive(custom_path=str(local_path))
-            
             thumbnail_bytes = await telegram_file.download_as_bytearray()
+            thumbnail_base64 = base64.b64encode(bytes(thumbnail_bytes)).decode("ascii")
             
             await self._update_upload_settings_callback(
                 thumbnail_file_id=file_id,
-                thumbnail_local_path=str(local_path),
-                thumbnail_bytes=bytes(thumbnail_bytes),
+                thumbnail_base64=thumbnail_base64,
             )
             self._pending_settings_action.pop(chat.id, None)
             await message.reply_text("Custom thumbnail saved.")
@@ -1222,8 +1213,8 @@ class TelegramBotApp:
             else "<i>Not set</i>"
         )
         thumb = (
-            escape(settings.thumbnail_local_path)
-            if settings.thumbnail_local_path
+            "Set (Custom)"
+            if settings.thumbnail_base64 or settings.thumbnail_file_id
             else "<i>Not set</i>"
         )
         return (
@@ -1309,7 +1300,7 @@ class TelegramBotApp:
             await self._update_user_settings_callback(
                 user_id=user_id,
                 thumbnail_file_id=None,
-                thumbnail_bytes=None,
+                thumbnail_base64=None,
             )
             await self._refresh_mysettings_message(query, user_id)
             return
@@ -1342,15 +1333,12 @@ class TelegramBotApp:
         if pending == SETTINGS_ACTION_THUMBNAIL:
             image = None
             file_id = None
-            suffix = ".jpg"
             if message.photo:
                 image = message.photo[-1]
                 file_id = image.file_id
             elif message.document and (message.document.mime_type or "").startswith("image/"):
                 image = message.document
                 file_id = image.file_id
-                if image.file_name and "." in image.file_name:
-                    suffix = Path(image.file_name).suffix or suffix
             
             if image is None or file_id is None:
                 await message.reply_text("Send a photo or image document for thumbnail.")
@@ -1358,11 +1346,12 @@ class TelegramBotApp:
 
             telegram_file = await image.get_file()
             thumbnail_bytes = await telegram_file.download_as_bytearray()
+            thumbnail_base64 = base64.b64encode(bytes(thumbnail_bytes)).decode("ascii")
             
             await self._update_user_settings_callback(
                 user_id=user.id,
                 thumbnail_file_id=file_id,
-                thumbnail_bytes=bytes(thumbnail_bytes),
+                thumbnail_base64=thumbnail_base64,
             )
             self._pending_user_settings_action.pop(user.id, None)
             await message.reply_text("Your custom thumbnail saved.")
@@ -1384,7 +1373,7 @@ class TelegramBotApp:
         )
         thumb_disp = (
             "Set (Custom)"
-            if settings.thumbnail_bytes or settings.thumbnail_file_id
+            if settings.thumbnail_base64 or settings.thumbnail_file_id
             else "<i>Not set (Using Global)</i>"
         )
         return (

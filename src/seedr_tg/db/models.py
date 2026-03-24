@@ -103,8 +103,7 @@ class UploadSettings:
     caption_template: str | None
     caption_parse_mode: CaptionParseMode
     thumbnail_file_id: str | None
-    thumbnail_local_path: str | None
-    thumbnail_bytes: bytes | None
+    thumbnail_base64: str | None
     created_at: str
     updated_at: str
 
@@ -114,6 +113,6 @@ class UserSettings:
     user_id: int
     caption_template: str | None
     thumbnail_file_id: str | None
-    thumbnail_bytes: bytes | None
+    thumbnail_base64: str | None
     created_at: str
     updated_at: str

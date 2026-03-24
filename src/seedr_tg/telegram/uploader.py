@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import math
@@ -1553,26 +1554,30 @@ class TelegramUploader:
         thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
         # Check user settings first
-        if user_settings and (user_settings.thumbnail_bytes or user_settings.thumbnail_file_id):
-            if user_settings.thumbnail_bytes:
-                # Reconstruct from DB bytes
+        if user_settings and (user_settings.thumbnail_base64 or user_settings.thumbnail_file_id):
+            if user_settings.thumbnail_base64:
+                # Reconstruct from DB base64.
                 path = thumbnails_dir / f"user_{user_settings.user_id}.jpg"
                 if not path.exists():
-                    path.write_bytes(user_settings.thumbnail_bytes)
+                    try:
+                        path.write_bytes(base64.b64decode(user_settings.thumbnail_base64, validate=True))
+                    except (ValueError, TypeError) as exc:
+                        LOGGER.warning("Invalid user thumbnail base64 for user %s: %s", user_settings.user_id, exc)
+                        return None
                 return path
 
         # Fallback to global settings
-        if upload_settings and (upload_settings.thumbnail_bytes or upload_settings.thumbnail_local_path):
-            if upload_settings.thumbnail_bytes:
-                # Reconstruct from DB bytes
+        if upload_settings and (upload_settings.thumbnail_base64 or upload_settings.thumbnail_file_id):
+            if upload_settings.thumbnail_base64:
+                # Reconstruct from DB base64.
                 path = thumbnails_dir / "global.jpg"
                 if not path.exists():
-                    path.write_bytes(upload_settings.thumbnail_bytes)
+                    try:
+                        path.write_bytes(base64.b64decode(upload_settings.thumbnail_base64, validate=True))
+                    except (ValueError, TypeError) as exc:
+                        LOGGER.warning("Invalid global thumbnail base64: %s", exc)
+                        return None
                 return path
-            if upload_settings.thumbnail_local_path:
-                path = Path(upload_settings.thumbnail_local_path)
-                if path.exists():
-                    return path
 
         return None
 

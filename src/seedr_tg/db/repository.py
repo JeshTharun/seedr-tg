@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 from dataclasses import asdict
 from typing import Any
@@ -23,6 +24,22 @@ from seedr_tg.db.models import (
 
 FINAL_PHASE_VALUES = [phase.value for phase in FINAL_PHASES]
 _UNSET = object()
+
+
+def _normalize_thumbnail_base64(
+    *,
+    thumbnail_base64: Any,
+    thumbnail_bytes: Any,
+) -> str | None:
+    if isinstance(thumbnail_base64, str):
+        normalized = thumbnail_base64.strip()
+        if normalized:
+            return normalized
+    if thumbnail_bytes is None:
+        return None
+    if isinstance(thumbnail_bytes, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(thumbnail_bytes)).decode("ascii")
+    return None
 
 
 def _serialize_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
@@ -312,8 +329,7 @@ class JobRepository:
                 caption_template=None,
                 caption_parse_mode=CaptionParseMode.HTML,
                 thumbnail_file_id=None,
-                thumbnail_local_path=None,
-                thumbnail_bytes=None,
+                thumbnail_base64=None,
                 created_at=now,
                 updated_at=now,
             )
@@ -326,8 +342,7 @@ class JobRepository:
         caption_template: str | None | object = _UNSET,
         caption_parse_mode: CaptionParseMode | str | object = _UNSET,
         thumbnail_file_id: str | None | object = _UNSET,
-        thumbnail_local_path: str | None | object = _UNSET,
-        thumbnail_bytes: bytes | None | object = _UNSET,
+        thumbnail_base64: str | None | object = _UNSET,
     ) -> UploadSettings:
         async with self._write_lock:
             existing_row = await self._state.find_one({"_id": "upload_settings"})
@@ -354,13 +369,10 @@ class JobRepository:
             new_thumbnail_file_id = (
                 current.thumbnail_file_id if thumbnail_file_id is _UNSET else thumbnail_file_id
             )
-            new_thumbnail_local_path = (
-                current.thumbnail_local_path
-                if thumbnail_local_path is _UNSET
-                else thumbnail_local_path
-            )
-            new_thumbnail_bytes = (
-                current.thumbnail_bytes if thumbnail_bytes is _UNSET else thumbnail_bytes
+            new_thumbnail_base64 = (
+                current.thumbnail_base64
+                if thumbnail_base64 is _UNSET
+                else thumbnail_base64
             )
 
             updated = UploadSettings(
@@ -368,8 +380,7 @@ class JobRepository:
                 caption_template=new_caption_template,
                 caption_parse_mode=new_caption_parse_mode,
                 thumbnail_file_id=new_thumbnail_file_id,
-                thumbnail_local_path=new_thumbnail_local_path,
-                thumbnail_bytes=new_thumbnail_bytes,
+                thumbnail_base64=new_thumbnail_base64,
                 created_at=current.created_at,
                 updated_at=utc_now(),
             )
@@ -434,8 +445,10 @@ class JobRepository:
                 row.get("caption_parse_mode", CaptionParseMode.HTML.value)
             ),
             thumbnail_file_id=row.get("thumbnail_file_id"),
-            thumbnail_local_path=row.get("thumbnail_local_path"),
-            thumbnail_bytes=row.get("thumbnail_bytes"),
+            thumbnail_base64=_normalize_thumbnail_base64(
+                thumbnail_base64=row.get("thumbnail_base64"),
+                thumbnail_bytes=row.get("thumbnail_bytes"),
+            ),
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -447,8 +460,7 @@ class JobRepository:
             "caption_template": settings.caption_template,
             "caption_parse_mode": settings.caption_parse_mode.value,
             "thumbnail_file_id": settings.thumbnail_file_id,
-            "thumbnail_local_path": settings.thumbnail_local_path,
-            "thumbnail_bytes": settings.thumbnail_bytes,
+            "thumbnail_base64": settings.thumbnail_base64,
             "created_at": settings.created_at,
             "updated_at": settings.updated_at,
         }
@@ -461,7 +473,7 @@ class JobRepository:
                 user_id=user_id,
                 caption_template=None,
                 thumbnail_file_id=None,
-                thumbnail_bytes=None,
+                thumbnail_base64=None,
                 created_at=now,
                 updated_at=now,
             )
@@ -473,7 +485,7 @@ class JobRepository:
         *,
         caption_template: str | None | object = _UNSET,
         thumbnail_file_id: str | None | object = _UNSET,
-        thumbnail_bytes: bytes | None | object = _UNSET,
+        thumbnail_base64: str | None | object = _UNSET,
     ) -> UserSettings:
         async with self._write_lock:
             existing_row = await self._users.find_one({"_id": user_id})
@@ -490,15 +502,17 @@ class JobRepository:
             new_thumbnail_file_id = (
                 current.thumbnail_file_id if thumbnail_file_id is _UNSET else thumbnail_file_id
             )
-            new_thumbnail_bytes = (
-                current.thumbnail_bytes if thumbnail_bytes is _UNSET else thumbnail_bytes
+            new_thumbnail_base64 = (
+                current.thumbnail_base64
+                if thumbnail_base64 is _UNSET
+                else thumbnail_base64
             )
 
             updated = UserSettings(
                 user_id=user_id,
                 caption_template=new_caption_template,
                 thumbnail_file_id=new_thumbnail_file_id,
-                thumbnail_bytes=new_thumbnail_bytes,
+                thumbnail_base64=new_thumbnail_base64,
                 created_at=current.created_at,
                 updated_at=utc_now(),
             )
@@ -518,7 +532,10 @@ class JobRepository:
             user_id=row["_id"],
             caption_template=row.get("caption_template"),
             thumbnail_file_id=row.get("thumbnail_file_id"),
-            thumbnail_bytes=row.get("thumbnail_bytes"),
+            thumbnail_base64=_normalize_thumbnail_base64(
+                thumbnail_base64=row.get("thumbnail_base64"),
+                thumbnail_bytes=row.get("thumbnail_bytes"),
+            ),
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -528,7 +545,7 @@ class JobRepository:
         return {
             "caption_template": settings.caption_template,
             "thumbnail_file_id": settings.thumbnail_file_id,
-            "thumbnail_bytes": settings.thumbnail_bytes,
+            "thumbnail_base64": settings.thumbnail_base64,
             "created_at": settings.created_at,
             "updated_at": settings.updated_at,
         }
