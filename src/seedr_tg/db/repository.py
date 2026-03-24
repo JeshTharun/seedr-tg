@@ -84,6 +84,7 @@ class JobRepository:
         self,
         *,
         magnet_link: str,
+        torrent_file_path: str | None = None,
         source_chat_id: int,
         source_message_id: int,
         target_chat_id: int,
@@ -98,6 +99,7 @@ class JobRepository:
             job = JobRecord(
                 id=job_id,
                 magnet_link=magnet_link,
+                torrent_file_path=torrent_file_path,
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
                 created_by_user_id=created_by_user_id,

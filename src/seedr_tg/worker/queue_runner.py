@@ -5,6 +5,7 @@ import contextlib
 import logging
 import shutil
 import time
+from pathlib import Path
 
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 
@@ -69,6 +70,32 @@ class QueueRunner:
             return None
         job = await self._repository.enqueue_job(
             magnet_link=magnet_link,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            target_chat_id=self._settings.telegram_target_chat_id,
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            created_by_display_name=created_by_display_name,
+        )
+        self._wake_event.set()
+        return job
+
+    async def enqueue_torrent_file(
+        self,
+        *,
+        source_key: str,
+        torrent_file_path: str,
+        source_chat_id: int,
+        source_message_id: int,
+        created_by_user_id: int | None = None,
+        created_by_username: str | None = None,
+        created_by_display_name: str | None = None,
+    ) -> JobRecord | None:
+        if await self._repository.has_active_magnet(source_key):
+            return None
+        job = await self._repository.enqueue_job(
+            magnet_link=source_key,
+            torrent_file_path=torrent_file_path,
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             target_chat_id=self._settings.telegram_target_chat_id,
@@ -180,7 +207,7 @@ class QueueRunner:
         await self._sync_admin_message(job)
 
         async with self._seedr_stage_semaphore:
-            torrent_id = await self._seedr_service.add_magnet(job.magnet_link)
+            torrent_id = await self._add_seedr_torrent_for_job(job)
             job = await self._transition(
                 job_id,
                 phase=JobPhase.WAITING_METADATA,
@@ -323,6 +350,18 @@ class QueueRunner:
             ),
         )
         await self._repository.renumber_queue()
+
+    async def _add_seedr_torrent_for_job(self, job: JobRecord) -> int | None:
+        if job.torrent_file_path:
+            torrent_path = Path(job.torrent_file_path)
+            if not torrent_path.exists():
+                raise FileNotFoundError(f"Queued torrent file not found: {torrent_path}")
+            try:
+                return await self._seedr_service.add_torrent_file(torrent_path)
+            finally:
+                with contextlib.suppress(OSError):
+                    torrent_path.unlink(missing_ok=True)
+        return await self._seedr_service.add_magnet(job.magnet_link)
 
     async def _wait_for_seedr(self, job_id: int, torrent_id: int | None):
         zero_progress_start: float | None = None

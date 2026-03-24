@@ -136,6 +136,39 @@ class SeedrService:
             )
             return result.user_torrent_id
 
+    async def add_torrent_file(self, torrent_file_path: Path | str) -> int | None:
+        client = await self._get_client()
+        file_path = Path(torrent_file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Torrent file not found: {file_path}")
+        try:
+            result = await client.add_torrent(torrent_file=str(file_path))
+            return result.user_torrent_id
+        except APIError as exc:
+            if not self._is_storage_related_api_error(exc):
+                raise
+            LOGGER.warning(
+                (
+                    "Seedr add_torrent(torrent_file) failed due to storage/quota limit. "
+                    "Attempting automatic cleanup before retry. error=%s"
+                ),
+                exc,
+            )
+            deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
+            if deleted_count <= 0:
+                LOGGER.warning(
+                    "Seedr cleanup did not remove removable artifacts; "
+                    "torrent file add retry skipped"
+                )
+                raise
+            await asyncio.sleep(0.6)
+            result = await client.add_torrent(torrent_file=str(file_path))
+            LOGGER.info(
+                "Seedr add_torrent(torrent_file) succeeded after cleanup retry; removed_items=%s",
+                deleted_count,
+            )
+            return result.user_torrent_id
+
     async def resolve_torrent(
         self,
         torrent_id: int | None,

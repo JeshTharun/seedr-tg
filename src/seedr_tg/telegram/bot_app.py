@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+from pathlib import Path
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -45,6 +46,8 @@ from seedr_tg.worker.progress import format_job_status
 LOGGER = logging.getLogger(__name__)
 MAGNET_PATTERN = re.compile(r"magnet:\?[^\s]+", re.IGNORECASE)
 TASK_CANCEL_PATTERN = re.compile(r"^(direct|rename):-?\d+:\d+$", re.IGNORECASE)
+_TORRENT_SUFFIX = ".torrent"
+_TORRENT_MIME_MARKER = "bittorrent"
 SETTINGS_ACTION_CAPTION = "caption"
 SETTINGS_ACTION_THUMBNAIL = "thumbnail"
 STATUS_PAGE_SIZE = 3
@@ -70,6 +73,10 @@ class TelegramBotApp:
         admin_chat_id: int,
         enqueue_callback: Callable[
             [str, int, int, int | None, str | None, str | None],
+            Awaitable[JobRecord | None],
+        ],
+        enqueue_torrent_callback: Callable[
+            [str, str, int, int, int | None, str | None, str | None],
             Awaitable[JobRecord | None],
         ],
         list_jobs_callback: Callable[[], Awaitable[list[JobRecord]]],
@@ -98,6 +105,7 @@ class TelegramBotApp:
         self._source_chat_id = source_chat_id
         self._admin_chat_id = admin_chat_id
         self._enqueue_callback = enqueue_callback
+        self._enqueue_torrent_callback = enqueue_torrent_callback
         self._list_jobs_callback = list_jobs_callback
         self._cancel_callback = cancel_callback
         self._set_admin_message_id_callback = set_admin_message_id_callback
@@ -164,7 +172,7 @@ class TelegramBotApp:
             CallbackQueryHandler(self._handle_status_callback, pattern=r"^status:")
         )
         self._application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
+            MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, self._on_message)
         )
         self._application.add_handler(
             MessageHandler(
@@ -275,22 +283,54 @@ class TelegramBotApp:
                 raise
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         message = update.effective_message
         chat = update.effective_chat
         if message is None or chat is None:
             return
-        magnet = self._extract_magnet(message.text or "")
-        if magnet is None:
-            return
         if not await self.is_chat_authorized(chat.id):
-            await message.reply_text(
-                "This chat is not authorized. A group admin can run /authorize first."
-            )
+            if self._extract_magnet((message.text or "") + "\n" + (message.caption or "")) is not None or self._is_torrent_document(message):
+                await message.reply_text(
+                    "This chat is not authorized. A group admin can run /authorize first."
+                )
             return
+
+        magnet = self._extract_magnet((message.text or "") + "\n" + (message.caption or ""))
+        if magnet is not None:
+            user = update.effective_user
+            job = await self._enqueue_callback(
+                magnet,
+                chat.id,
+                message.message_id,
+                user.id if user is not None else None,
+                user.username if user is not None else None,
+                user.full_name if user is not None else None,
+            )
+            if job is None:
+                await self.post_admin_message("<b>Ignored duplicate magnet</b>")
+                return
+            # Queue runner owns lifecycle status messages to avoid duplicate posts from race conditions.
+            await asyncio.sleep(0)
+            return
+
+        if not self._is_torrent_document(message):
+            return
+
         user = update.effective_user
-        job = await self._enqueue_callback(
-            magnet,
+        source_key = self._build_torrent_source_key(message)
+        pending_dir = self._status_download_dir / "pending_torrents"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        torrent_path = pending_dir / f"chat_{chat.id}_msg_{message.message_id}{_TORRENT_SUFFIX}"
+        try:
+            telegram_file = await context.bot.get_file(message.document.file_id)
+            await telegram_file.download_to_drive(custom_path=str(torrent_path))
+        except (BadRequest, RetryAfter, OSError) as exc:
+            LOGGER.warning("Failed to download .torrent attachment chat_id=%s message_id=%s: %s", chat.id, message.message_id, exc)
+            await message.reply_text("Failed to download the .torrent file. Please retry.")
+            return
+
+        job = await self._enqueue_torrent_callback(
+            source_key,
+            str(torrent_path),
             chat.id,
             message.message_id,
             user.id if user is not None else None,
@@ -298,10 +338,30 @@ class TelegramBotApp:
             user.full_name if user is not None else None,
         )
         if job is None:
-            await self.post_admin_message("<b>Ignored duplicate magnet</b>")
+            with contextlib.suppress(OSError):
+                torrent_path.unlink(missing_ok=True)
+            await self.post_admin_message("<b>Ignored duplicate torrent file</b>")
             return
         # Queue runner owns lifecycle status messages to avoid duplicate posts from race conditions.
         await asyncio.sleep(0)
+
+    @staticmethod
+    def _is_torrent_document(message) -> bool:
+        document = getattr(message, "document", None)
+        if document is None:
+            return False
+        file_name = (document.file_name or "").strip().lower()
+        mime_type = (document.mime_type or "").strip().lower()
+        return file_name.endswith(_TORRENT_SUFFIX) or _TORRENT_MIME_MARKER in mime_type
+
+    @staticmethod
+    def _build_torrent_source_key(message) -> str:
+        document = getattr(message, "document", None)
+        file_unique_id = getattr(document, "file_unique_id", None) if document is not None else None
+        if file_unique_id:
+            return f"torrent-file:{file_unique_id}"
+        chat_id = getattr(getattr(message, "chat", None), "id", 0)
+        return f"torrent-file:chat{chat_id}:msg{getattr(message, 'message_id', 0)}"
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context

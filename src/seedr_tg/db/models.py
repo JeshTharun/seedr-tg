@@ -39,6 +39,7 @@ FINAL_PHASES = {JobPhase.COMPLETED, JobPhase.FAILED, JobPhase.CANCELED}
 class JobRecord:
     id: int
     magnet_link: str
+    torrent_file_path: str | None
     source_chat_id: int
     source_message_id: int
     created_by_user_id: int | None

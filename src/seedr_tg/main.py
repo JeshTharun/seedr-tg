@@ -74,6 +74,26 @@ async def run() -> None:
             display_name,
         )
 
+    async def enqueue_torrent_callback(
+        source_key: str,
+        torrent_file_path: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int | None,
+        username: str | None,
+        display_name: str | None,
+    ):
+        assert queue_runner is not None
+        return await queue_runner.enqueue_torrent_file(
+            source_key=source_key,
+            torrent_file_path=torrent_file_path,
+            source_chat_id=chat_id,
+            source_message_id=message_id,
+            created_by_user_id=user_id,
+            created_by_username=username,
+            created_by_display_name=display_name,
+        )
+
     async def list_jobs_callback():
         assert queue_runner is not None
         return await queue_runner.list_jobs()
@@ -156,6 +176,7 @@ async def run() -> None:
         source_chat_id=settings.telegram_source_chat_id,
         admin_chat_id=settings.telegram_admin_chat_id,
         enqueue_callback=enqueue_callback,
+        enqueue_torrent_callback=enqueue_torrent_callback,
         list_jobs_callback=list_jobs_callback,
         cancel_callback=cancel_callback,
         set_admin_message_id_callback=set_admin_message_id_callback,
