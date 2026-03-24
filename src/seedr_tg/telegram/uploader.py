@@ -49,6 +49,10 @@ from seedr_tg.status.template import (
 LOGGER = logging.getLogger(__name__)
 _TELEGRAM_FILENAME_MAX_BYTES = 255
 _INVALID_FILENAME_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
+_LEADING_1TAMILMV_PREFIX = re.compile(
+    r"^\s*(?:www\.)?1tamilmv\.[a-z0-9.-]+\s*[-_]+\s*",
+    re.IGNORECASE,
+)
 try:
     from pyrogram.errors import FloodPremiumWait
 
@@ -1632,7 +1636,12 @@ class TelegramUploader:
 
     @staticmethod
     def _build_telegram_filename(filename: str) -> str:
-        candidate = _INVALID_FILENAME_CHARS.sub("_", (filename or "").strip())
+        raw_name = (filename or "").strip()
+        raw_path = Path(raw_name)
+        raw_extension = raw_path.suffix
+        raw_stem = raw_name[: -len(raw_extension)] if raw_extension else raw_name
+        cleaned_stem = TelegramUploader._strip_leading_release_site_prefix(raw_stem)
+        candidate = _INVALID_FILENAME_CHARS.sub("_", f"{cleaned_stem}{raw_extension}")
         candidate = candidate.replace("\n", " ").replace("\r", " ").strip(" .")
         if not candidate:
             candidate = "file"
@@ -1647,6 +1656,11 @@ class TelegramUploader:
         if len(final_name.encode("utf-8")) <= _TELEGRAM_FILENAME_MAX_BYTES:
             return final_name
         return TelegramUploader._truncate_utf8(final_name, _TELEGRAM_FILENAME_MAX_BYTES)
+
+    @staticmethod
+    def _strip_leading_release_site_prefix(stem: str) -> str:
+        cleaned = _LEADING_1TAMILMV_PREFIX.sub("", stem).strip(" .")
+        return cleaned if cleaned else stem
 
     @staticmethod
     def _truncate_utf8(text: str, max_bytes: int) -> str:
