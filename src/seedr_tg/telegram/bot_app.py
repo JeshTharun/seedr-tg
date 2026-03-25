@@ -287,6 +287,10 @@ class TelegramBotApp:
         chat = update.effective_chat
         if message is None or chat is None:
             return
+        if await self._handle_admin_settings_input(update, context):
+            return
+        if await self._handle_user_settings_input(update, context):
+            return
         if not await self.is_chat_authorized(chat.id):
             if self._extract_magnet((message.text or "") + "\n" + (message.caption or "")) is not None or self._is_torrent_document(message):
                 await message.reply_text(
@@ -1094,23 +1098,23 @@ class TelegramBotApp:
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
+    ) -> bool:
         del context
         message = update.effective_message
         chat = update.effective_chat
         if message is None or chat is None or chat.id != self._admin_chat_id:
-            return
+            return False
         pending = self._pending_settings_action.get(chat.id)
         if pending is None:
-            return
+            return False
         if pending == SETTINGS_ACTION_CAPTION:
             if not message.text:
                 await message.reply_text("Send caption text as plain message.")
-                return
+                return True
             await self._update_upload_settings_callback(caption_template=message.text.strip())
             self._pending_settings_action.pop(chat.id, None)
             await message.reply_text("Custom caption saved.")
-            return
+            return True
         if pending == SETTINGS_ACTION_THUMBNAIL:
             image = None
             file_id = None
@@ -1122,7 +1126,7 @@ class TelegramBotApp:
                 file_id = image.file_id
             if image is None or file_id is None:
                 await message.reply_text("Send a photo or image document for thumbnail.")
-                return
+                return True
             telegram_file = await image.get_file()
             thumbnail_bytes = await telegram_file.download_as_bytearray()
             thumbnail_base64 = base64.b64encode(bytes(thumbnail_bytes)).decode("ascii")
@@ -1133,6 +1137,8 @@ class TelegramBotApp:
             )
             self._pending_settings_action.pop(chat.id, None)
             await message.reply_text("Custom thumbnail saved.")
+            return True
+        return False
 
     async def _refresh_settings_message(self, query) -> None:
         settings = await self._get_upload_settings_callback()
@@ -1317,6 +1323,7 @@ class TelegramBotApp:
         )
 
     async def _mysettings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
         user = update.effective_user
         if user is None:
             return
@@ -1332,6 +1339,7 @@ class TelegramBotApp:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
+        del context
         query = update.callback_query
         if query is None or query.data is None:
             return
@@ -1372,23 +1380,24 @@ class TelegramBotApp:
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
+    ) -> bool:
+        del context
         message = update.effective_message
         user = update.effective_user
         if message is None or user is None:
-            return
+            return False
         pending = self._pending_user_settings_action.get(user.id)
         if pending is None:
-            return
+            return False
 
         if pending == SETTINGS_ACTION_CAPTION:
             if not message.text:
                 await message.reply_text("Send caption text as plain message.")
-                return
+                return True
             await self._update_user_settings_callback(user_id=user.id, caption_template=message.text.strip())
             self._pending_user_settings_action.pop(user.id, None)
             await message.reply_text("Your custom caption saved.")
-            return
+            return True
 
         if pending == SETTINGS_ACTION_THUMBNAIL:
             image = None
@@ -1402,7 +1411,7 @@ class TelegramBotApp:
             
             if image is None or file_id is None:
                 await message.reply_text("Send a photo or image document for thumbnail.")
-                return
+                return True
 
             telegram_file = await image.get_file()
             thumbnail_bytes = await telegram_file.download_as_bytearray()
@@ -1415,6 +1424,8 @@ class TelegramBotApp:
             )
             self._pending_user_settings_action.pop(user.id, None)
             await message.reply_text("Your custom thumbnail saved.")
+            return True
+        return False
 
     async def _refresh_mysettings_message(self, query, user_id: int) -> None:
         settings = await self._get_user_settings_callback(user_id)
