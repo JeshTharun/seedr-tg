@@ -878,15 +878,6 @@ class TelegramUploader:
                     )
                     if part_size_bytes <= 0:
                         raise RuntimeError(f"Refusing to upload empty part: {target_path}")
-                    use_client_session = False
-                    if self._upload_hybrid_mode:
-                        use_client_session = (
-                            part_size_bytes
-                            > self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
-                        )
-                    else:
-                        use_client_session = part_size_bytes > self._BOT_API_FILE_SIZE_LIMIT_BYTES
-
                     async with semaphore:
                         target_payload = dict(upload_payload)
                         target_payload["file_path"] = str(target_path)
@@ -897,47 +888,19 @@ class TelegramUploader:
                             base_offset=offset_base,
                             total_size=file_size_bytes,
                         )
-
-                        if use_client_session:
-                            if part_size_bytes > effective_mtproto_limit:
-                                max_mib = effective_mtproto_limit / (1024 * 1024)
-                                actual_mib = part_size_bytes / (1024 * 1024)
-                                raise TelegramUploadTooLargeError(
-                                    "Split part exceeds active MTProto limit "
-                                    f"({actual_mib:.2f} MiB > {max_mib:.0f} MiB)."
-                                )
-                            client = await self._get_client()
-                            had_flood_wait, retry_count = await self._send_file_with_retry(
-                                client,
-                                target_payload,
-                                upload_max_retries=upload_max_retries,
+                        if part_size_bytes > effective_mtproto_limit:
+                            max_mib = effective_mtproto_limit / (1024 * 1024)
+                            actual_mib = part_size_bytes / (1024 * 1024)
+                            raise TelegramUploadTooLargeError(
+                                "Split part exceeds active MTProto limit "
+                                f"({actual_mib:.2f} MiB > {max_mib:.0f} MiB)."
                             )
-                        else:
-                            had_flood_wait, retry_count = await self._send_file_via_bot_with_retry(
-                                file_path=target_path,
-                                caption=caption,
-                                parse_mode=parse_mode,
-                                media_type=(
-                                    upload_settings.media_type
-                                    if upload_settings
-                                    else UploadMediaType.MEDIA
-                                ),
-                                thumb_path=thumb_path,
-                                telegram_filename=target_name,
-                                upload_max_retries=upload_max_retries,
-                                progress_hook=None,
-                                completed_files=completed_files,
-                                total_files=total_files,
-                                mtproto_fallback_payload=target_payload,
-                                mtproto_upload_max_retries=upload_max_retries,
-                            )
-                            on_progress(
-                                int(min(file_size_bytes, offset_base + part_size_bytes)),
-                                int(file_size_bytes),
-                                current_name=telegram_filename,
-                                base_offset=0,
-                                total_size=file_size_bytes,
-                            )
+                        client = await self._get_client()
+                        had_flood_wait, retry_count = await self._send_file_with_retry(
+                            client,
+                            target_payload,
+                            upload_max_retries=upload_max_retries,
+                        )
 
                         if self._upload_governor_enabled:
                             await self._record_upload_outcome(
