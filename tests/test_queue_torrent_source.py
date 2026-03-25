@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from seedr_tg.db.models import JobPhase
 from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
 from seedr_tg.seedr.poller import SeedrTrackingLostError
 from seedr_tg.worker.queue_runner import QueueRunner
@@ -99,3 +101,98 @@ async def test_ensure_under_limit_raises_human_readable_4gb_warning():
 
     with pytest.raises(SeedrMaxTorrentSizeError, match="up to 4GB only"):
         await service.ensure_under_limit((4 * 1024 * 1024 * 1024) + 1)
+
+
+@pytest.mark.asyncio
+async def test_process_job_preserves_known_folder_id_for_download_and_cleanup(tmp_path):
+    runner = QueueRunner.__new__(QueueRunner)
+
+    downloaded_file = tmp_path / "video.mp4"
+    downloaded_file.write_bytes(b"test")
+
+    job = SimpleNamespace(
+        id=1,
+        phase=JobPhase.QUEUED,
+        magnet_link="magnet:?xt=urn:btih:abc",
+        torrent_file_path=None,
+        seedr_torrent_id=None,
+        seedr_folder_id=777,
+        seedr_folder_name="known-folder",
+        total_size_bytes=None,
+        created_by_user_id=None,
+        source_chat_id=123,
+    )
+
+    class _Repo:
+        async def get_job(self, _job_id: int):
+            return job
+
+        async def get_upload_settings(self):
+            return None
+
+        async def get_user_settings(self, _user_id: int):
+            return None
+
+        async def renumber_queue(self):
+            return None
+
+    download_folder_args: list[int | None] = []
+    cleanup_jobs: list[SimpleNamespace] = []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def fake_transition(_job_id: int, **updates):
+        for key, value in updates.items():
+            setattr(job, key, value)
+        return job
+
+    async def fake_wait_for_seedr(_job_id: int, _torrent_id: int | None):
+        return SimpleNamespace(
+            title="Example",
+            total_size_bytes=downloaded_file.stat().st_size,
+            seedr_folder_id=None,
+            seedr_folder_name=None,
+            is_complete=True,
+        )
+
+    async def fake_fetch_remote_files_with_retry(folder_id: int | None):
+        download_folder_args.append(folder_id)
+        return [SimpleNamespace(name="video.mp4", size=downloaded_file.stat().st_size)]
+
+    async def fake_download_files(*_args, **_kwargs):
+        return [downloaded_file]
+
+    async def fake_cleanup_seedr_artifacts(cleanup_job):
+        cleanup_jobs.append(cleanup_job)
+
+    async def fake_add_seedr_torrent_for_job(_job):
+        return 55
+
+    object.__setattr__(runner, "_settings", SimpleNamespace(
+        download_root=tmp_path,
+        download_concurrency=1,
+        upload_concurrency=1,
+        upload_part_size_kb=512,
+        upload_max_retries=1,
+    ))
+    object.__setattr__(runner, "_repository", _Repo())
+    object.__setattr__(runner, "_seedr_service", SimpleNamespace(ensure_under_limit=_noop))
+    object.__setattr__(runner, "_uploader", SimpleNamespace(upload_files=_noop))
+    object.__setattr__(runner, "_downloader", SimpleNamespace(download_files=fake_download_files))
+    object.__setattr__(runner, "_seedr_stage_semaphore", asyncio.Semaphore(1))
+    object.__setattr__(runner, "_cancel_processed_jobs", set())
+
+    object.__setattr__(runner, "_transition", fake_transition)
+    object.__setattr__(runner, "_sync_admin_message", _noop)
+    object.__setattr__(runner, "_add_seedr_torrent_for_job", fake_add_seedr_torrent_for_job)
+    object.__setattr__(runner, "_wait_for_seedr", fake_wait_for_seedr)
+    object.__setattr__(runner, "_fetch_remote_files_with_retry", fake_fetch_remote_files_with_retry)
+    object.__setattr__(runner, "_cleanup_seedr_artifacts", fake_cleanup_seedr_artifacts)
+    object.__setattr__(runner, "_post_task_outcome", _noop)
+
+    await runner._process_job(1)
+
+    assert download_folder_args == [777]
+    assert len(cleanup_jobs) == 1
+    assert cleanup_jobs[0].seedr_folder_id == 777

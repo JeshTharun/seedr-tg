@@ -219,13 +219,18 @@ class QueueRunner:
 
             snapshot = await self._wait_for_seedr(job_id, torrent_id)
             await self._seedr_service.ensure_under_limit(snapshot.total_size_bytes)
+            latest_job = await self._repository.get_job(job_id)
+            resolved_seedr_folder_id = snapshot.seedr_folder_id or latest_job.seedr_folder_id
+            resolved_seedr_folder_name = (
+                snapshot.seedr_folder_name or latest_job.seedr_folder_name
+            )
             job = await self._transition(
                 job_id,
                 phase=JobPhase.DOWNLOADING_LOCAL,
                 torrent_name=snapshot.title,
                 total_size_bytes=snapshot.total_size_bytes,
-                seedr_folder_id=snapshot.seedr_folder_id,
-                seedr_folder_name=snapshot.seedr_folder_name,
+                seedr_folder_id=resolved_seedr_folder_id,
+                seedr_folder_name=resolved_seedr_folder_name,
                 progress_percent=100.0,
                 download_speed_bps=0.0,
                 upload_speed_bps=0.0,
@@ -233,7 +238,7 @@ class QueueRunner:
             )
             await self._sync_admin_message(job)
 
-            remote_files = await self._fetch_remote_files_with_retry(snapshot.seedr_folder_id)
+            remote_files = await self._fetch_remote_files_with_retry(resolved_seedr_folder_id)
             if not remote_files:
                 raise RuntimeError("Seedr finished torrent without downloadable files")
             local_root = self._settings.download_root / f"job_{job.id}"
@@ -250,10 +255,8 @@ class QueueRunner:
                 ),
             )
 
-            if snapshot.seedr_folder_id is not None:
-                await self._seedr_service.delete_folder(snapshot.seedr_folder_id)
-            else:
-                await self._seedr_service.delete_torrent(torrent_id)
+            cleanup_job = await self._repository.get_job(job_id)
+            await self._cleanup_seedr_artifacts(cleanup_job)
         upload_file_paths = [
             path for path in file_paths if path.suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
         ]
