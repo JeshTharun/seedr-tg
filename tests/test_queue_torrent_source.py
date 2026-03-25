@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
+from seedr_tg.seedr.poller import SeedrTrackingLostError
 from seedr_tg.worker.queue_runner import QueueRunner
 
 
@@ -67,6 +68,24 @@ def test_format_failure_reason_returns_plain_seedr_limit_warning():
     )
 
     assert reason == "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+
+
+def test_format_failure_reason_returns_plain_seedr_tracking_lost_reason():
+    format_reason = getattr(QueueRunner, "_format_failure_reason")
+    reason = format_reason(
+        SeedrTrackingLostError(
+            "Seedr stopped tracking this torrent. Common causes: source is larger than 4GB, magnet is invalid/dead, or Seedr removed it due to account/storage limits."
+        )
+    )
+
+    assert reason.startswith("Seedr stopped tracking this torrent")
+
+
+def test_format_failure_reason_uses_plain_runtime_message_without_prefix():
+    format_reason = getattr(QueueRunner, "_format_failure_reason")
+    reason = format_reason(RuntimeError("Something failed clearly"))
+
+    assert reason == "Something failed clearly"
 
 
 @pytest.mark.asyncio

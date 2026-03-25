@@ -15,6 +15,10 @@ class TorrentSnapshot:
     is_complete: bool
 
 
+class SeedrTrackingLostError(RuntimeError):
+    pass
+
+
 class SeedrPoller:
     def __init__(self, seedr_service: SeedrService) -> None:
         self._seedr_service = seedr_service
@@ -39,7 +43,10 @@ class SeedrPoller:
             is_complete = True
             
         if resolved.torrent is None and resolved.folder is None and not resolved.has_files:
-            raise RuntimeError("Torrent disappeared from Seedr unexpectedly or could not be tracked.")
+            raise SeedrTrackingLostError(
+                "Seedr stopped tracking this torrent. Common causes: source is larger than 4GB, "
+                "magnet is invalid/dead, or Seedr removed it due to account/storage limits."
+            )
             
         if resolved.has_files and (resolved.torrent is None or progress_percent >= 99.9):
             progress_percent = max(progress_percent, 100.0)

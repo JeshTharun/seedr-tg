@@ -7,13 +7,14 @@ import shutil
 import time
 from pathlib import Path
 
+from seedrcc.exceptions import APIError
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 
 from seedr_tg.config import Settings
 from seedr_tg.db.models import FINAL_PHASES, JobPhase, JobRecord
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
-from seedr_tg.seedr.poller import SeedrPoller
+from seedr_tg.seedr.poller import SeedrPoller, SeedrTrackingLostError
 from seedr_tg.status.outcome import (
     RequesterIdentity,
     elapsed_seconds_from_iso,
@@ -535,11 +536,16 @@ class QueueRunner:
 
     @staticmethod
     def _format_failure_reason(exc: Exception) -> str:
-        if isinstance(exc, SeedrMaxTorrentSizeError):
-            return str(exc)
         message = str(exc).strip()
+        if isinstance(exc, (SeedrMaxTorrentSizeError, SeedrTrackingLostError)) and message:
+            return message
+        if isinstance(exc, APIError) and message.lower() == "api operation failed.":
+            return (
+                "Seedr API rejected this task. Common causes: source exceeds 4GB, "
+                "invalid/dead magnet, or Seedr account/storage limits."
+            )
         if message:
-            return f"{exc.__class__.__name__}: {message}"
+            return message
         cause = exc.__cause__
         if cause is None:
             return exc.__class__.__name__
