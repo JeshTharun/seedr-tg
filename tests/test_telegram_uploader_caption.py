@@ -69,3 +69,22 @@ def test_render_caption_keeps_unknown_placeholders_without_fallback():
 
     assert parse_mode == "html"
     assert caption == "Track.flac | {unknown_field}"
+
+
+def test_render_caption_strips_leading_1tamilmv_prefix_from_display_filename():
+    render_caption = getattr(TelegramUploader, "_render_caption")
+    caption, parse_mode = render_caption(
+        file_path=Path(
+            "www.1TamilMV.cymru - Repu Udayam 10 Gantalaku (2026) Tamil HQ HDRip - x264 - AAC - 250MB - ESub.mkv"
+        ),
+        caption_prefix="Torrent Name",
+        job_id=42,
+        upload_settings=_upload_settings(),
+        user_settings=None,
+    )
+
+    assert parse_mode is None
+    assert (
+        caption
+        == "Torrent Name\nRepu Udayam 10 Gantalaku (2026) Tamil HQ HDRip - x264 - AAC - 250MB - ESub.mkv"
+    )

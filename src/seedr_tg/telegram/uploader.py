@@ -1595,7 +1595,9 @@ class TelegramUploader:
         user_settings: UserSettings | None = None,
         display_filename: str | None = None,
     ) -> tuple[str, str | None]:
-        filename = display_filename or file_path.name
+        filename = TelegramUploader._build_caption_display_filename(
+            display_filename or file_path.name
+        )
         
         template = None
         if user_settings and user_settings.caption_template:
@@ -1633,6 +1635,18 @@ class TelegramUploader:
         if include_filename_prefix:
             return f"{filename}\n{rendered}", parse_mode
         return rendered, parse_mode
+
+    @staticmethod
+    def _build_caption_display_filename(filename: str) -> str:
+        raw_name = (filename or "").strip()
+        if not raw_name:
+            return "file"
+        raw_path = Path(raw_name)
+        extension = raw_path.suffix
+        raw_stem = raw_name[: -len(extension)] if extension else raw_name
+        cleaned_stem = TelegramUploader._strip_leading_release_site_prefix(raw_stem)
+        caption_name = f"{cleaned_stem}{extension}".strip()
+        return caption_name or "file"
 
     @staticmethod
     def _render_caption_template(
