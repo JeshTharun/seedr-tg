@@ -8,7 +8,7 @@ def test_build_telegram_filename_strips_leading_1tamilmv_prefix():
         "www.1TamilMV.immo - Sabdham (2025) Tamil HQ HDRip - x264 - AAC - 400MB - ESub.mkv"
     )
 
-    assert result == "Sabdham_2025_Tamil_HQ_HDRip_x264_AAC_400MB_ESub.mkv"
+    assert result == "Sabdham (2025) Tamil HQ HDRip - x264 - AAC - 400MB - ESu.mkv"
 
 
 def test_build_telegram_filename_strips_leading_1tamilmv_for_other_domains():
@@ -19,14 +19,14 @@ def test_build_telegram_filename_strips_leading_1tamilmv_for_other_domains():
         "www.1TamilMV.com - Another Title (2024).mkv"
     )
 
-    assert io_result == "Movie_Title_2026.mp4"
-    assert com_result == "Another_Title_2024.mkv"
+    assert io_result == "Movie Title (2026).mp4"
+    assert com_result == "Another Title (2024).mkv"
 
 
-def test_build_telegram_filename_replaces_spaces_and_special_chars_with_underscores():
+def test_build_telegram_filename_replaces_invalid_chars_without_forcing_underscores():
     result = TelegramUploader._build_telegram_filename("My cool*movie:2026! final cut?.mp4")
 
-    assert result == "My_cool_movie_2026_final_cut.mp4"
+    assert result == "My cool movie 2026! final cut.mp4"
 
 
 def test_build_telegram_filename_truncates_stem_to_fit_60_chars_including_extension():

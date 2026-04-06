@@ -49,7 +49,6 @@ from seedr_tg.status.template import (
 LOGGER = logging.getLogger(__name__)
 _TELEGRAM_FILENAME_MAX_CHARS = 60
 _INVALID_FILENAME_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
-_NON_ALNUM_PATTERN = re.compile(r"[^A-Za-z0-9]+")
 _LEADING_1TAMILMV_PREFIX = re.compile(
     r"^\s*(?:www\.)?1tamilmv\.[a-z0-9.-]+\s*[-_]+\s*",
     re.IGNORECASE,
@@ -795,7 +794,7 @@ class TelegramUploader:
                 job_id=job_id,
                 upload_settings=upload_settings,
                 user_settings=user_settings,
-                display_filename=telegram_filename,
+                display_filename=file_path.name,
             )
             thumb_path = self._resolve_thumbnail_path(upload_settings, user_settings)
             upload_payload: dict[str, Any] = {
@@ -1668,13 +1667,13 @@ class TelegramUploader:
         raw_stem = raw_name[: -len(extension)] if extension else raw_name
         cleaned_stem = TelegramUploader._strip_leading_release_site_prefix(raw_stem)
 
-        # Keep Telegram filenames deterministic and ASCII-safe to avoid auto-rename surprises.
-        stem = cleaned_stem.replace("\n", "_").replace("\r", "_")
-        stem = _INVALID_FILENAME_CHARS.sub("_", stem)
-        stem = _NON_ALNUM_PATTERN.sub("_", stem).strip("_") or "file"
+        stem = cleaned_stem.replace("\n", " ").replace("\r", " ")
+        stem = _INVALID_FILENAME_CHARS.sub(" ", stem)
+        stem = re.sub(r"\s+", " ", stem).strip(" ._") or "file"
 
         base_budget = max(1, _TELEGRAM_FILENAME_MAX_CHARS - len(extension))
         truncated_stem = stem[:base_budget]
+        truncated_stem = truncated_stem.rstrip(" ._-") or "file"
         final_name = f"{truncated_stem}{extension}"
         if len(final_name) <= _TELEGRAM_FILENAME_MAX_CHARS:
             return final_name
