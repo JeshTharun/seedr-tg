@@ -1540,30 +1540,46 @@ class TelegramUploader:
         # Check user settings first
         if user_settings and (user_settings.thumbnail_base64 or user_settings.thumbnail_file_id):
             if user_settings.thumbnail_base64:
-                # Reconstruct from DB base64.
                 path = thumbnails_dir / f"user_{user_settings.user_id}.jpg"
-                if not path.exists():
-                    try:
-                        path.write_bytes(base64.b64decode(user_settings.thumbnail_base64, validate=True))
-                    except (ValueError, TypeError) as exc:
-                        LOGGER.warning("Invalid user thumbnail base64 for user %s: %s", user_settings.user_id, exc)
-                        return None
-                return path
+                return TelegramUploader._sync_thumbnail_cache_file(
+                    path=path,
+                    thumbnail_base64=user_settings.thumbnail_base64,
+                    warning_context=f"user {user_settings.user_id}",
+                )
 
         # Fallback to global settings
         if upload_settings and (upload_settings.thumbnail_base64 or upload_settings.thumbnail_file_id):
             if upload_settings.thumbnail_base64:
-                # Reconstruct from DB base64.
                 path = thumbnails_dir / "global.jpg"
-                if not path.exists():
-                    try:
-                        path.write_bytes(base64.b64decode(upload_settings.thumbnail_base64, validate=True))
-                    except (ValueError, TypeError) as exc:
-                        LOGGER.warning("Invalid global thumbnail base64: %s", exc)
-                        return None
-                return path
+                return TelegramUploader._sync_thumbnail_cache_file(
+                    path=path,
+                    thumbnail_base64=upload_settings.thumbnail_base64,
+                    warning_context="global settings",
+                )
 
         return None
+
+    @staticmethod
+    def _sync_thumbnail_cache_file(
+        *,
+        path: Path,
+        thumbnail_base64: str,
+        warning_context: str,
+    ) -> Path | None:
+        try:
+            decoded = base64.b64decode(thumbnail_base64, validate=True)
+        except (ValueError, TypeError) as exc:
+            LOGGER.warning("Invalid thumbnail base64 for %s: %s", warning_context, exc)
+            return None
+
+        try:
+            current = path.read_bytes() if path.exists() else None
+            if current != decoded:
+                path.write_bytes(decoded)
+        except OSError as exc:
+            LOGGER.warning("Failed to persist thumbnail cache for %s: %s", warning_context, exc)
+            return None
+        return path
 
     @staticmethod
     def _render_caption(
