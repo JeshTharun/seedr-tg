@@ -43,8 +43,7 @@ def render_task_outcome_message(
     if phase == JobPhase.COMPLETED:
         lines.extend(
             [
-                "[&lt;&gt;] File(s) have been Sent. Access via Links...",
-                "[&lt;&gt;] File(s) have been Sent to Bot PM (Private)",
+                "File have been Sent to Target Channel.",
             ]
         )
         names = file_names or []
